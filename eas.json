@@ -1,0 +1,43 @@
+{
+  "cli": {
+    "version": ">= 18.0.0"
+  },
+  "build": {
+    "production": {
+      "android": {
+        "buildType": "app-bundle",
+        "credentialsSource": "local"
+      },
+      "ios": {
+        "credentialsSource": "local"
+      },
+      "env": {
+        "EXPO_PUBLIC_WALLETCONNECT_PROJECT_ID": "@WALLETCONNECT_PROJECT_ID"
+      }
+    },
+    "preview": {
+      "android": {
+        "buildType": "apk",
+        "credentialsSource": "local"
+      },
+      "ios": {
+        "credentialsSource": "local"
+      },
+      "env": {
+        "EXPO_PUBLIC_WALLETCONNECT_PROJECT_ID": "@WALLETCONNECT_PROJECT_ID"
+      }
+    },
+    "release": {
+      "android": {
+        "buildType": "app-bundle",
+        "credentialsSource": "local"
+      },
+      "ios": {
+        "credentialsSource": "local"
+      },
+      "env": {
+        "EXPO_PUBLIC_WALLETCONNECT_PROJECT_ID": "@WALLETCONNECT_PROJECT_ID"
+      }
+    }
+  }
+}
