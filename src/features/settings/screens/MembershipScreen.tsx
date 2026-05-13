@@ -5,401 +5,201 @@ import {
   TouchableOpacity,
   ScrollView,
   Alert,
-  ActivityIndicator,
+  Linking,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { useSafeAreaInsets, SafeAreaView } from 'react-native-safe-area-context';
-// import Purchases from 'react-native-purchases';
-import { useAppTranslation } from '../../../shared/hooks/useAppTranslation';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAppStore } from '../../../shared/store/useAppStore';
-// import { getPurchaseErrorMessage } from '../../../shared/config/RevenueCatConfig';
 
-type MembershipTier = 'basic' | 'pro' | 'ultimate' | 'vip';
+// ─────────────────────────────────────────────────────────────
+// Types
+// ─────────────────────────────────────────────────────────────
 
-interface TierFeature {
+type PlanId = 'basic' | 'pro' | 'ultimate';
+type BillingCycle = 'monthly' | 'annual';
+
+interface Feature {
   icon: string;
-  name: string;
+  title: string;
   description: string;
 }
 
-interface TierData {
+interface Plan {
+  id: PlanId;
   name: string;
-  price: string;
-  features: TierFeature[];
+  tagline: string;
   color: string;
-  productId: string; // RevenueCat Product ID
+  monthlyPrice: string | null;
+  annualPrice: string | null;
+  annualNote: string | null;
+  ctaLabel: string;
+  ctaStyle: 'filled' | 'outline' | 'disabled';
+  badge?: string;
+  comingSoon?: boolean;
+  inheritFrom?: string;
+  features: Feature[];
 }
 
-const MEMBERSHIP_TIERS: Record<MembershipTier, TierData> = {
-  basic: {
-    name: 'Basic',
-    price: 'membership.basic.name',
+const PLANS: Plan[] = [
+  {
+    id: 'basic',
+    name: 'Kura Basic',
+    tagline: 'Your private finance command center, free forever',
     color: '#10B981',
-    productId: 'kura_basic', // Free tier, no purchase needed
+    monthlyPrice: null,
+    annualPrice: null,
+    annualNote: null,
+    ctaLabel: 'Get Started Free',
+    ctaStyle: 'outline',
     features: [
       {
-        icon: 'link',
-        name: 'membership.basic.unlimitedConnections',
-        description: 'membership.basic.unlimitedConnectionsDesc',
+        icon: 'lock-closed',
+        title: 'Zero-Access Core',
+        description: 'Encrypted account visibility without server-side raw data exposure.',
       },
       {
-        icon: 'trending-up',
-        name: 'membership.basic.netWorth',
-        description: 'membership.basic.netWorthDesc',
+        icon: 'git-network',
+        title: 'Multi-Source Sync',
+        description: 'Connect fiat and on-chain sources with strict read-only permissions.',
       },
       {
-        icon: 'calendar',
-        name: 'membership.basic.thirtyDayHistory',
-        description: 'membership.basic.thirtyDayHistoryDesc',
+        icon: 'bar-chart',
+        title: 'Privacy Dashboard',
+        description: '30-day private analytics with no ad tracking.',
       },
     ],
   },
-  pro: {
-    name: 'Pro',
-    price: 'membership.pro.name',
-    color: '#3B82F6',
-    productId: 'kura_pro_annual', // RevenueCat Product ID
+  {
+    id: 'pro',
+    name: 'Kura Pro',
+    tagline: 'Smarter market insights and everyday money control',
+    color: '#8B5CF6',
+    monthlyPrice: '$12.99',
+    annualPrice: '$10.83',
+    annualNote: '$129.99 billed annually',
+    ctaLabel: 'Start Pro Trial',
+    ctaStyle: 'filled',
+    badge: 'Popular',
+    inheritFrom: 'Everything in Basic',
     features: [
       {
-        icon: 'alert-circle',
-        name: 'membership.pro.crossDomainAlerts',
-        description: 'membership.pro.crossDomainAlertsDesc',
+        icon: 'analytics',
+        title: 'Market Intelligence',
+        description:
+          'Research stocks and crypto with company/token profiles, key metrics, and timely market updates in one place.',
       },
       {
-        icon: 'document-text',
-        name: 'membership.pro.taxExport',
-        description: 'membership.pro.taxExportDesc',
+        icon: 'layers',
+        title: 'DeFi Protocol Insights',
+        description:
+          'Monitor protocol health, ecosystem activity, and total value locked (TVL) across leading on-chain ecosystems.',
       },
       {
-        icon: 'infinite',
-        name: 'membership.pro.permanentHistory',
-        description: 'membership.pro.permanentHistoryDesc',
+        icon: 'wallet',
+        title: 'Budget Planner',
+        description:
+          'Track money in and money out, add manual transactions anytime, and tailor categories to fit your real-life spending.',
       },
       {
         icon: 'sync',
-        name: 'membership.pro.advancedSync',
-        description: 'membership.pro.advancedSyncDesc',
+        title: 'Priority Sync',
+        description:
+          '5 manual syncs per day plus scheduled background sync every 6 hours.',
       },
     ],
   },
-  ultimate: {
-    name: 'Ultimate',
-    price: 'membership.ultimate.name',
-    color: '#8B5CF6',
-    productId: 'kura_ultimate_annual', // RevenueCat Product ID
+  {
+    id: 'ultimate',
+    name: 'Kura Ultimate',
+    tagline: 'Institutional-grade analytics for serious operators',
+    color: '#F59E0B',
+    monthlyPrice: null,
+    annualPrice: null,
+    annualNote: null,
+    ctaLabel: 'Coming Soon',
+    ctaStyle: 'disabled',
+    comingSoon: true,
+    inheritFrom: 'Everything in Pro',
     features: [
       {
-        icon: 'layers',
-        name: 'membership.ultimate.defiAnalytics',
-        description: 'membership.ultimate.defiAnalyticsDesc',
+        icon: 'swap-horizontal',
+        title: 'Impermanent Loss Tracking',
+        description:
+          'Calculate LP position impact with confidential processing inside a trusted execution environment (TEE).',
       },
       {
-        icon: 'notifications',
-        name: 'membership.ultimate.realTimeAlerts',
-        description: 'membership.ultimate.realTimeAlertsDesc',
+        icon: 'document-text',
+        title: 'Transaction Support Tax Report',
+        description:
+          'Export transaction-level tax support reports powered by privacy-preserving calculations inside TEE.',
+      },
+      {
+        icon: 'infinite',
+        title: 'Unlimited History',
+        description: 'Access your complete historical data and analytics with no retention limits.',
       },
       {
         icon: 'flash',
-        name: 'membership.ultimate.highFreqSync',
-        description: 'membership.ultimate.highFreqSyncDesc',
+        title: 'High-Frequency Sync',
+        description:
+          'Near real-time visibility with 20 manual syncs per day and hourly background sync.',
       },
     ],
   },
-  vip: {
-    name: 'VIP',
-    price: 'membership.vip.name',
-    color: '#F59E0B',
-    productId: 'kura_vip_annual', // RevenueCat Product ID
-    features: [
-      {
-        icon: 'server',
-        name: 'membership.vip.customNode',
-        description: 'membership.vip.customNodeDesc',
-      },
-      {
-        icon: 'code',
-        name: 'membership.vip.developerApi',
-        description: 'membership.vip.developerApiDesc',
-      },
-    ],
-  },
-};
+];
 
-interface MembershipScreenProps {
+const ACCENT = '#8B5CF6';
+
+// ─────────────────────────────────────────────────────────────
+// Component
+// ─────────────────────────────────────────────────────────────
+
+interface Props {
   navigation?: any;
 }
 
-export default function MembershipScreen({ navigation }: MembershipScreenProps) {
-  const insets = useSafeAreaInsets();
-  const { t } = useAppTranslation();
-  const userProfile = useAppStore((state) => state.userProfile);
-  const [isPurchasing, setIsPurchasing] = useState(false);
+export default function MembershipScreen({ navigation }: Props) {
+  const userProfile = useAppStore((s) => s.userProfile);
+  const [selectedId, setSelectedId] = useState<PlanId>('pro');
+  const [billing, setBilling] = useState<BillingCycle>('monthly');
 
-  // Get current membership tier from Store and normalize it
-  const getMembershipTierFromLabel = (label: string): MembershipTier => {
-    if (!label) return 'basic';
-    
-    const normalizedLabel = label.toLowerCase();
-    
-    // Handle different label formats
-    if (normalizedLabel.includes('basic')) return 'basic';
-    if (normalizedLabel.includes('pro')) return 'pro';
-    if (normalizedLabel.includes('ultimate')) return 'ultimate';
-    if (normalizedLabel.includes('vip')) return 'vip';
-    
-    return 'basic'; // fallback
+  const currentLabel = (userProfile.membershipLabel || 'basic').toLowerCase();
+  const currentPlanId: PlanId = currentLabel.includes('pro')
+    ? 'pro'
+    : currentLabel.includes('ultimate')
+    ? 'ultimate'
+    : 'basic';
+
+  const selected = PLANS.find((p) => p.id === selectedId)!;
+
+  const displayPrice = (): { main: string; sub: string } => {
+    if (selected.id === 'basic') return { main: 'Free', sub: 'forever' };
+    if (selected.comingSoon) return { main: 'Coming', sub: 'Soon' };
+    if (billing === 'annual' && selected.annualPrice) {
+      return { main: selected.annualPrice, sub: '/mo · ' + selected.annualNote };
+    }
+    return { main: selected.monthlyPrice ?? '—', sub: '/month' };
   };
 
-  const currentMembershipTier = getMembershipTierFromLabel(userProfile.membershipLabel);
+  const price = displayPrice();
 
-  // Initialize selected tier to current membership tier
-  const [selectedTier, setSelectedTier] = useState<MembershipTier>(currentMembershipTier);
-  const [billingCycle, setBillingCycle] = useState<'monthly' | 'annual'>('monthly');
-
-  const currentTier = MEMBERSHIP_TIERS[selectedTier];
-
-  const handleUpgrade = async () => {
-    try {
-      setIsPurchasing(true);
-
-      // Special handling for VIP - KEEP THIS PART UNCHANGED
-      if (selectedTier === 'vip') {
-        Alert.alert(
-          'Contact Sales',
-          'Please contact our sales team for VIP pricing',
-          [
-            { text: 'Cancel', onPress: () => setIsPurchasing(false) },
-            { 
-              text: 'Email Us',
-              onPress: () => {
-                // Open email client
-                setIsPurchasing(false);
-                // TODO: Implement email link
-              }
-            },
-          ]
-        );
-        return;
-      }
-
-      // Basic tier - no purchase needed
-      if (selectedTier === 'basic') {
-        Alert.alert(
-          'Already on Basic',
-          'You are already on the Basic plan',
-          [{ text: 'OK', onPress: () => setIsPurchasing(false) }]
-        );
-        return;
-      }
-
-      // COMING SOON - Show notification for Pro and Ultimate tiers
-      Alert.alert(
-        'Coming Soon',
-        'This feature is coming soon, please stay tuned!',
-        [{ text: 'OK', onPress: () => setIsPurchasing(false) }]
-      );
+  const handleCta = () => {
+    if (selected.comingSoon) {
+      Alert.alert('Coming Soon', 'Kura Ultimate is under active development. Stay tuned!');
       return;
-
-      /* ===== PURCHASE LOGIC COMMENTED OUT - COMING SOON ===== */
-      // // Get the product ID for selected tier
-      // const productId = currentTier.productId;
-      // const tierName = currentTier.name;
-
-      // // Get available offerings from RevenueCat
-      // // Reference: https://www.revenuecat.com/docs/getting-started/displaying-products
-      // const offerings = await Purchases.getOfferings();
-
-      // if (!offerings.current) {
-      //   // Debug: Log all available offerings
-      //   const allOfferingIds = offerings.all
-      //     ? Object.values(offerings.all).map((o: any) => o.identifier)
-      //     : [];
-      //   console.log('DEBUG: All offerings:', allOfferingIds);
-      //   throw new Error(
-      //     'No subscription plans available. Please try again later.'
-      //   );
-      // }
-
-      // const offering = offerings.current;
-
-      // if (
-      //   !offering.availablePackages ||
-      //   offering.availablePackages.length === 0
-      // ) {
-      //   throw new Error('No packages available for purchase');
-      // }
-
-      // // Debug logging
-      // console.log('DEBUG: Looking for productId:', productId);
-      // const packageList = (offering.availablePackages || []).map(
-      //   (pkg: any) => ({
-      //     identifier: pkg.identifier,
-      //     displayName: pkg.displayName,
-      //   })
-      // );
-      // console.log('DEBUG: Available packages:', packageList);
-
-      // // Find the package matching our product ID
-      // const selectedPackage = offering.availablePackages.find(
-      //   (pkg: any) => pkg.identifier === productId
-      // );
-
-      // if (!selectedPackage) {
-      //   const availableIds = (offering.availablePackages || [])
-      //     .map((pkg: any) => pkg.identifier)
-      //     .join(', ');
-      //   throw new Error(
-      //     `Package ${productId} not found. Available packages: ${availableIds}. Please ensure the product is configured in RevenueCat dashboard.`
-      //   );
-      // }
-
-      // // Show purchase confirmation with pricing
-      // // Reference: https://www.revenuecat.com/docs/getting-started/making-purchases
-      // const priceString = selectedPackage.product.priceString || 'Check AppStore';
-      // Alert.alert(`Subscribe to ${tierName}`, `Price: ${priceString}`, [
-      //   {
-      //     text: 'Cancel',
-      //     onPress: () => setIsPurchasing(false),
-      //     style: 'cancel',
-      //   },
-      //   {
-      //     text: 'Subscribe',
-      //     onPress: async () => {
-      //       try {
-      //         // Perform the purchase
-      //         const purchaseResult = await Purchases.purchasePackage(
-      //           selectedPackage
-      //         );
-
-      //         // Check if purchase was successful by verifying entitlements
-      //         const { customerInfo } = purchaseResult;
-      //         const entitlements = customerInfo.entitlements.active;
-
-      //         // Check if any entitlement is active (indicating successful purchase)
-      //         if (Object.keys(entitlements).length > 0) {
-      //           Alert.alert(
-      //             'Success',
-      //             `Welcome to ${tierName}! Your subscription is now active.`,
-      //             [
-      //               {
-      //                 text: 'OK',
-      //                 onPress: () => {
-      //                   setIsPurchasing(false);
-      //                   navigation?.goBack();
-      //                 },
-      //               },
-      //             ]
-      //           );
-      //         } else {
-      //           throw new Error(
-      //             'Purchase completed but subscription was not activated'
-      //           );
-      //         }
-      //       } catch (purchaseError) {
-      //         // Handle purchase errors
-      //         const errorMsg =
-      //           purchaseError instanceof Error
-      //             ? purchaseError.message
-      //             : String(purchaseError);
-
-      //         // Check if user cancelled
-      //         if (
-      //           errorMsg.includes('cancelled') ||
-      //           errorMsg.includes('Cancelled')
-      //         ) {
-      //           setIsPurchasing(false);
-      //           return;
-      //         }
-
-      //         throw purchaseError;
-      //       }
-      //     },
-      //   },
-      // ]);
-      /* ===== END OF COMMENTED PURCHASE LOGIC ===== */
-    } catch (error) {
-      // const errorMessage = getPurchaseErrorMessage(error);
-      
-      // Alert.alert(
-      //   'Purchase Failed',
-      //   errorMessage,
-      //   [{ text: 'OK', onPress: () => setIsPurchasing(false) }]
-      // );
     }
+    if (selected.id === 'basic') {
+      if (currentPlanId === 'basic') {
+        Alert.alert('Current Plan', 'You are already on the Basic plan.');
+      }
+      return;
+    }
+    // Pro — future: RevenueCat / Stripe
+    Alert.alert(
+      'Start Pro Trial',
+      'Paid plans are coming soon. A 15-day free trial will be available at launch.',
+    );
   };
-
-  // Get button text based on user's current tier vs selected tier
-  const getButtonText = () => {
-    // VIP tier - show custom text
-    if (selectedTier === 'vip') {
-      return t('membership.contactSales') || 'Contact Sales';
-    }
-
-    // Pro and Ultimate tiers - show "Coming Soon" (尚未推出)
-    if (selectedTier === 'pro' || selectedTier === 'ultimate') {
-      return 'Coming Soon';
-    }
-
-    // Basic tier
-    const tierHierarchy = ['basic', 'pro', 'ultimate', 'vip'];
-    const selectedTierIndex = tierHierarchy.indexOf(selectedTier);
-    const currentTierIndex = tierHierarchy.indexOf(currentMembershipTier);
-
-    if (selectedTierIndex === currentTierIndex) {
-      return t('membership.currentPlan') || 'Current Plan';
-    } else if (selectedTierIndex > currentTierIndex) {
-      return `${t('membership.upgradeTo')} ${currentTier.name}`;
-    } else {
-      return `${t('membership.downgradeTo')} ${currentTier.name}`;
-    }
-  };
-
-  const getPriceDisplay = () => {
-    if (selectedTier === 'basic') {
-      return {
-        price: t('membership.basic.price') || '免費',
-        period: '',
-        note: '',
-        isBasic: true,
-      };
-    }
-
-    if (selectedTier === 'vip') {
-      return {
-        price: t('membership.vip.price'),
-        period: t('membership.vip.priceNote'),
-        note: t('membership.contactSalesDesc'),
-        isVIP: true,
-      };
-    }
-
-    if (selectedTier === 'pro') {
-      const price = billingCycle === 'monthly' 
-        ? t('membership.pro.monthlyPrice')
-        : t('membership.pro.annualPrice');
-      const period = billingCycle === 'monthly'
-        ? t('membership.perMonth')
-        : t('membership.perYear');
-      const note = billingCycle === 'annual'
-        ? t('membership.pro.annualPriceNote')
-        : '';
-      return { price, period, note, isVIP: false };
-    }
-
-    // Ultimate
-    const price = billingCycle === 'monthly'
-      ? t('membership.ultimate.monthlyPrice')
-      : t('membership.ultimate.annualPrice');
-    const period = billingCycle === 'monthly'
-      ? t('membership.perMonth')
-      : t('membership.perYear');
-    const note = billingCycle === 'annual'
-      ? t('membership.ultimate.annualPriceNote')
-      : '';
-    return { price, period, note, isVIP: false };
-  };
-
-  const priceDisplay = getPriceDisplay();
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: '#0B0B0F' }}>
@@ -407,260 +207,327 @@ export default function MembershipScreen({ navigation }: MembershipScreenProps) 
       <View
         style={{
           flexDirection: 'row',
-          alignItems: 'flex-start',
-          paddingHorizontal: 16,
-          paddingVertical: 12,
+          alignItems: 'center',
+          paddingHorizontal: 20,
+          paddingVertical: 14,
           borderBottomWidth: 1,
-          borderBottomColor: '#333333',
+          borderBottomColor: 'rgba(255,255,255,0.07)',
         }}
       >
-        <TouchableOpacity onPress={() => navigation?.goBack()}>
-          <Ionicons name="chevron-back" size={28} color="#FFFFFF" />
+        <TouchableOpacity onPress={() => navigation?.goBack()} style={{ marginRight: 12 }}>
+          <Ionicons name="chevron-back" size={26} color="#FFFFFF" />
         </TouchableOpacity>
-        <Text
-          style={{
-            flex: 1,
-            fontSize: 18,
-            fontWeight: '600',
-            color: '#FFFFFF',
-            marginLeft: 12,
-          }}
-        >
-          {t('membership.title')}
-        </Text>
+        <Text style={{ fontSize: 18, fontWeight: '700', color: '#FFFFFF' }}>Plans & Pricing</Text>
       </View>
 
       <ScrollView
-        style={{ flex: 1 }}
-        contentContainerStyle={{ paddingHorizontal: 16, paddingVertical: 24 }}
         showsVerticalScrollIndicator={false}
+        contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: 60 }}
       >
-        {/* Tier Selection */}
-        <View style={{ flexDirection: 'row', gap: 12, marginBottom: 24 }}>
-          {(['basic', 'pro', 'ultimate', 'vip'] as MembershipTier[]).map((tier) => {
-            const tierData = MEMBERSHIP_TIERS[tier];
-            const isSelected = selectedTier === tier;
+        {/* Hero */}
+        <View style={{ alignItems: 'center', paddingVertical: 28 }}>
+          <Text
+            style={{
+              fontSize: 13,
+              fontWeight: '600',
+              color: ACCENT,
+              textTransform: 'uppercase',
+              letterSpacing: 1.2,
+              marginBottom: 8,
+            }}
+          >
+            Simple, Privacy-First Pricing
+          </Text>
+          <Text
+            style={{
+              fontSize: 22,
+              fontWeight: '700',
+              color: '#FFFFFF',
+              textAlign: 'center',
+              lineHeight: 30,
+            }}
+          >
+            Choose the privacy layer{'\n'}that fits your operation
+          </Text>
+        </View>
 
+        {/* Plan selector pills */}
+        <View
+          style={{
+            flexDirection: 'row',
+            backgroundColor: '#1A1A24',
+            borderRadius: 14,
+            padding: 4,
+            marginBottom: 24,
+          }}
+        >
+          {PLANS.map((plan) => {
+            const isActive = selectedId === plan.id;
             return (
               <TouchableOpacity
-                key={tier}
-                onPress={() => setSelectedTier(tier)}
+                key={plan.id}
+                onPress={() => setSelectedId(plan.id)}
                 style={{
                   flex: 1,
-                  paddingVertical: 12,
-                  paddingHorizontal: 8,
-                  borderRadius: 12,
-                  backgroundColor: isSelected
-                    ? `${tierData.color}20`
-                    : 'rgba(255, 255, 255, 0.05)',
-                  borderWidth: isSelected ? 2 : 1,
-                  borderColor: isSelected ? tierData.color : '#333333',
+                  paddingVertical: 9,
+                  borderRadius: 11,
+                  alignItems: 'center',
+                  backgroundColor: isActive ? plan.color : 'transparent',
                 }}
               >
                 <Text
                   style={{
-                    fontSize: 14,
-                    fontWeight: '600',
-                    color: isSelected ? tierData.color : '#999999',
-                    textAlign: 'center',
+                    fontSize: 13,
+                    fontWeight: '700',
+                    color: isActive ? '#FFFFFF' : '#888888',
                   }}
                 >
-                  {tierData.name}
+                  {plan.id === 'ultimate' ? 'Ultimate' : plan.id === 'pro' ? 'Pro' : 'Basic'}
                 </Text>
+                {plan.badge && (
+                  <Text style={{ fontSize: 9, color: isActive ? '#FFFFFFCC' : '#555', marginTop: 1 }}>
+                    {plan.badge}
+                  </Text>
+                )}
+                {plan.comingSoon && (
+                  <Text style={{ fontSize: 9, color: isActive ? '#FFFFFFCC' : '#555', marginTop: 1 }}>
+                    Soon
+                  </Text>
+                )}
               </TouchableOpacity>
             );
           })}
         </View>
 
-        {/* Price Section */}
+        {/* Plan card */}
         <View
           style={{
-            backgroundColor: priceDisplay.isBasic 
-              ? 'rgba(16, 185, 129, 0.1)' 
-              : priceDisplay.isVIP 
-              ? 'rgba(245, 158, 11, 0.1)' 
-              : 'rgba(139, 92, 246, 0.1)',
-            borderRadius: 12,
-            padding: 20,
+            backgroundColor: `${selected.color}10`,
+            borderRadius: 20,
+            borderWidth: 1.5,
+            borderColor: `${selected.color}50`,
+            padding: 22,
             marginBottom: 24,
-            borderWidth: 1,
-            borderColor: currentTier.color,
           }}
         >
-          {/* Price Header with Billing Cycle Toggle */}
-          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16 }}>
-            {/* Price Display */}
-            <View>
-              <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 4, marginBottom: 8 }}>
-                <Text
-                  style={{
-                    fontSize: 32,
-                    fontWeight: '700',
-                    color: currentTier.color,
-                  }}
-                >
-                  {priceDisplay.price}
-                </Text>
-                <Text
-                  style={{
-                    fontSize: 14,
-                    color: '#999999',
-                  }}
-                >
-                  {priceDisplay.period}
+          {/* Badge row */}
+          <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 6 }}>
+            {selected.badge && (
+              <View
+                style={{
+                  backgroundColor: selected.color,
+                  borderRadius: 6,
+                  paddingHorizontal: 8,
+                  paddingVertical: 3,
+                  marginRight: 8,
+                }}
+              >
+                <Text style={{ color: '#FFF', fontSize: 11, fontWeight: '700' }}>
+                  {selected.badge}
                 </Text>
               </View>
-              
-              {priceDisplay.note && (
-                <Text
-                  style={{
-                    fontSize: 12,
-                    color: '#999999',
-                  }}
-                >
-                  {priceDisplay.note}
+            )}
+            {selected.comingSoon && (
+              <View
+                style={{
+                  borderWidth: 1,
+                  borderColor: selected.color,
+                  borderRadius: 6,
+                  paddingHorizontal: 8,
+                  paddingVertical: 3,
+                  marginRight: 8,
+                }}
+              >
+                <Text style={{ color: selected.color, fontSize: 11, fontWeight: '700' }}>
+                  Coming Soon
                 </Text>
-              )}
-            </View>
-
-            {/* Billing Cycle Toggle - Right Side (only for Pro and Ultimate) */}
-            {selectedTier !== 'basic' && selectedTier !== 'vip' && (
-              <View style={{ flexDirection: 'row', gap: 8 }}>
-                <TouchableOpacity
-                  onPress={() => setBillingCycle('monthly')}
-                  style={{
-                    paddingVertical: 8,
-                    paddingHorizontal: 12,
-                    borderRadius: 6,
-                    backgroundColor: billingCycle === 'monthly' ? currentTier.color : 'rgba(255, 255, 255, 0.05)',
-                    borderWidth: billingCycle === 'monthly' ? 0 : 1,
-                    borderColor: '#333333',
-                  }}
-                >
-                  <Text
-                    style={{
-                      fontSize: 11,
-                      fontWeight: '600',
-                      color: billingCycle === 'monthly' ? '#FFFFFF' : '#999999',
-                    }}
-                  >
-                    {t('membership.monthly')}
-                  </Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  onPress={() => setBillingCycle('annual')}
-                  style={{
-                    paddingVertical: 8,
-                    paddingHorizontal: 12,
-                    borderRadius: 6,
-                    backgroundColor: billingCycle === 'annual' ? currentTier.color : 'rgba(255, 255, 255, 0.05)',
-                    borderWidth: billingCycle === 'annual' ? 0 : 1,
-                    borderColor: '#333333',
-                  }}
-                >
-                  <Text
-                    style={{
-                      fontSize: 11,
-                      fontWeight: '600',
-                      color: billingCycle === 'annual' ? '#FFFFFF' : '#999999',
-                    }}
-                  >
-                    {t('membership.annual')}
-                  </Text>
-                </TouchableOpacity>
+              </View>
+            )}
+            {currentPlanId === selected.id && (
+              <View
+                style={{
+                  borderWidth: 1,
+                  borderColor: '#555',
+                  borderRadius: 6,
+                  paddingHorizontal: 8,
+                  paddingVertical: 3,
+                }}
+              >
+                <Text style={{ color: '#AAA', fontSize: 11, fontWeight: '600' }}>
+                  Current Plan
+                </Text>
               </View>
             )}
           </View>
 
+          {/* Plan name + tagline */}
+          <Text style={{ fontSize: 20, fontWeight: '800', color: selected.color, marginBottom: 4 }}>
+            {selected.name}
+          </Text>
+          <Text style={{ fontSize: 13, color: '#999999', marginBottom: 20, lineHeight: 18 }}>
+            {selected.tagline}
+          </Text>
+
+          {/* Price */}
+          <View style={{ flexDirection: 'row', alignItems: 'baseline', marginBottom: 6 }}>
+            <Text style={{ fontSize: 36, fontWeight: '800', color: '#FFFFFF' }}>
+              {price.main}
+            </Text>
+            <Text style={{ fontSize: 13, color: '#888', marginLeft: 6 }}>{price.sub}</Text>
+          </View>
+
+          {/* Billing toggle (Pro only) */}
+          {selected.id === 'pro' && !selected.comingSoon && (
+            <View style={{ flexDirection: 'row', gap: 8, marginBottom: 20 }}>
+              {(['monthly', 'annual'] as BillingCycle[]).map((cycle) => (
+                <TouchableOpacity
+                  key={cycle}
+                  onPress={() => setBilling(cycle)}
+                  style={{
+                    paddingVertical: 7,
+                    paddingHorizontal: 14,
+                    borderRadius: 8,
+                    backgroundColor:
+                      billing === cycle ? selected.color : 'rgba(255,255,255,0.06)',
+                    borderWidth: 1,
+                    borderColor: billing === cycle ? 'transparent' : 'rgba(255,255,255,0.1)',
+                  }}
+                >
+                  <Text
+                    style={{
+                      fontSize: 12,
+                      fontWeight: '600',
+                      color: billing === cycle ? '#FFF' : '#888',
+                    }}
+                  >
+                    {cycle === 'monthly' ? 'Monthly' : 'Annual · Save 17%'}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          )}
+
+          {!selected.id && <View style={{ marginBottom: 20 }} />}
+
+          {/* CTA button */}
           <TouchableOpacity
-            onPress={handleUpgrade}
-            disabled={isPurchasing || selectedTier === currentMembershipTier || selectedTier === 'pro' || selectedTier === 'ultimate'}
+            onPress={handleCta}
+            disabled={selected.ctaStyle === 'disabled' || currentPlanId === selected.id}
             style={{
-              backgroundColor: isPurchasing || selectedTier === currentMembershipTier || selectedTier === 'pro' || selectedTier === 'ultimate' ? '#999999' : currentTier.color,
-              paddingVertical: 12,
-              borderRadius: 8,
+              paddingVertical: 14,
+              borderRadius: 12,
               alignItems: 'center',
-              flexDirection: 'row',
-              justifyContent: 'center',
-              gap: 8,
+              backgroundColor:
+                selected.ctaStyle === 'filled' && currentPlanId !== selected.id
+                  ? selected.color
+                  : 'transparent',
+              borderWidth:
+                selected.ctaStyle === 'outline' && currentPlanId !== selected.id ? 2 : 0,
+              borderColor:
+                selected.ctaStyle === 'outline' ? selected.color : 'transparent',
+              opacity: selected.ctaStyle === 'disabled' || currentPlanId === selected.id ? 0.4 : 1,
             }}
           >
-            {isPurchasing && <ActivityIndicator color="#FFFFFF" />}
             <Text
               style={{
                 fontSize: 16,
-                fontWeight: '600',
-                color: '#FFFFFF',
+                fontWeight: '700',
+                color:
+                  selected.ctaStyle === 'outline' ? selected.color : '#FFFFFF',
               }}
             >
-              {isPurchasing ? 'Processing...' : getButtonText()}
+              {currentPlanId === selected.id ? 'Current Plan' : selected.ctaLabel}
             </Text>
           </TouchableOpacity>
         </View>
 
-        {/* Features Section */}
+        {/* Features */}
         <View style={{ marginBottom: 32 }}>
-          <View style={{ marginBottom: 16 }}>
-            <Text
+          {selected.inheritFrom && (
+            <View
               style={{
-                fontSize: 16,
-                fontWeight: '600',
-                color: '#FFFFFF',
-                marginBottom: 4,
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: 8,
+                marginBottom: 16,
+                paddingVertical: 10,
+                paddingHorizontal: 14,
+                backgroundColor: 'rgba(255,255,255,0.04)',
+                borderRadius: 10,
               }}
             >
-              {t('membership.features')}
-            </Text>
-            {selectedTier !== 'basic' && (
-              <Text
-                style={{
-                  fontSize: 12,
-                  color: '#999999',
-                }}
-              >
-                {selectedTier === 'pro' && t('membership.includesAllBasic')}
-                {selectedTier === 'ultimate' && t('membership.includesAllPro')}
-                {selectedTier === 'vip' && t('membership.includesAllUltimate')}
+              <Ionicons name="checkmark-circle" size={16} color={selected.color} />
+              <Text style={{ fontSize: 13, color: '#CCCCCC', fontWeight: '500' }}>
+                {selected.inheritFrom}
               </Text>
-            )}
-          </View>
+            </View>
+          )}
 
-          {currentTier.features.map((feature, index) => (
-            <View key={index} style={{ marginBottom: 16, flexDirection: 'row', gap: 12 }}>
+          {selected.features.map((feat, i) => (
+            <View
+              key={i}
+              style={{
+                flexDirection: 'row',
+                gap: 14,
+                marginBottom: 18,
+              }}
+            >
               <View
                 style={{
-                  width: 40,
-                  height: 40,
-                  borderRadius: 8,
-                  backgroundColor: `rgba(139, 92, 246, 0.1)`,
-                  justifyContent: 'center',
+                  width: 42,
+                  height: 42,
+                  borderRadius: 10,
+                  backgroundColor: `${selected.color}18`,
                   alignItems: 'center',
+                  justifyContent: 'center',
+                  flexShrink: 0,
                 }}
               >
-                <Ionicons name={feature.icon as any} size={20} color={currentTier.color} />
+                <Ionicons name={feat.icon as any} size={20} color={selected.color} />
               </View>
               <View style={{ flex: 1 }}>
                 <Text
-                  style={{
-                    fontSize: 14,
-                    fontWeight: '600',
-                    color: '#FFFFFF',
-                    marginBottom: 4,
-                  }}
+                  style={{ fontSize: 14, fontWeight: '700', color: '#FFFFFF', marginBottom: 3 }}
                 >
-                  {t(feature.name)}
+                  {feat.title}
                 </Text>
-                <Text
-                  style={{
-                    fontSize: 12,
-                    color: '#999999',
-                  }}
-                >
-                  {t(feature.description)}
+                <Text style={{ fontSize: 12, color: '#888888', lineHeight: 18 }}>
+                  {feat.description}
                 </Text>
               </View>
             </View>
           ))}
+        </View>
+
+        {/* FAQ teaser */}
+        <View
+          style={{
+            borderTopWidth: 1,
+            borderTopColor: 'rgba(255,255,255,0.07)',
+            paddingTop: 24,
+            gap: 14,
+          }}
+        >
+          {[
+            { q: 'Is my data secure?', a: 'Zero-access design — our servers cannot read your raw financial records.' },
+            { q: 'Can I switch plans anytime?', a: 'Yes. Upgrade or downgrade at any time with no lock-in.' },
+            { q: 'Is there a free trial?', a: 'Pro includes a 15-day free trial at launch.' },
+          ].map((item, i) => (
+            <View key={i}>
+              <Text style={{ fontSize: 13, fontWeight: '700', color: '#DDDDDD', marginBottom: 3 }}>
+                {item.q}
+              </Text>
+              <Text style={{ fontSize: 12, color: '#777777', lineHeight: 18 }}>{item.a}</Text>
+            </View>
+          ))}
+
+          <TouchableOpacity
+            onPress={() => Linking.openURL('https://kura-finance.com/pricing')}
+            style={{ marginTop: 8, flexDirection: 'row', alignItems: 'center', gap: 4 }}
+          >
+            <Text style={{ fontSize: 13, color: ACCENT, fontWeight: '600' }}>Full pricing details</Text>
+            <Ionicons name="arrow-forward" size={13} color={ACCENT} />
+          </TouchableOpacity>
         </View>
       </ScrollView>
     </SafeAreaView>
