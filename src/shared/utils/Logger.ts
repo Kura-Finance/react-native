@@ -9,7 +9,6 @@ interface LogEntry {
   data?: any;
 }
 
-// 環境級別設定：生產環境只顯示 WARN 和 ERROR，開發環境顯示所有
 const LOG_LEVEL: Record<LogLevel, number> = {
   debug: 0,
   info: 1,
@@ -17,7 +16,9 @@ const LOG_LEVEL: Record<LogLevel, number> = {
   error: 3,
 };
 
-const MIN_LOG_LEVEL = __DEV__ ? LOG_LEVEL.debug : LOG_LEVEL.warn;
+// Only WARN and ERROR are printed in all environments.
+// Set to LOG_LEVEL.debug temporarily if you need verbose output during a debug session.
+const MIN_LOG_LEVEL = LOG_LEVEL.warn;
 
 // 用於去重：同一模塊同一條消息在短時間內只記錄一次
 const DEDUP_MAP = new Map<string, number>();

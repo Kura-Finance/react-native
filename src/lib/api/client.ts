@@ -148,11 +148,8 @@ export async function requestJson<T>(
     }
   }
 
-  Logger.debug(apiName, 'Request', {
-    method: init.method || 'GET',
-    url,
-    hasAuth: headers.has('Authorization'),
-  });
+  // Request tracing — uncomment for debugging a specific flow
+  // Logger.debug(apiName, 'Request', { method: init.method || 'GET', url, hasAuth: headers.has('Authorization') });
 
   let response: Response;
   try {
@@ -195,11 +192,6 @@ export async function requestJson<T>(
   }
 
   const data = unwrapEnvelope<T>(parsed ?? {});
-  Logger.debug(apiName, 'Response ok', {
-    url,
-    status: response.status,
-    data: safeRedact(data),
-  });
   return data;
 }
 

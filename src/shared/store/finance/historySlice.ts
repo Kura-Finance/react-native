@@ -16,6 +16,9 @@ import { AssetSnapshot, FinanceState, HistoryState } from './types';
 import { fetchAssetHistory } from '../../../lib/api/asset';
 import Logger from '../../utils/Logger';
 import { isStablecoin } from '../../utils/stablecoinUtils';
+import { readCache, writeCache } from '../../../lib/cache/dataCache';
+
+const HISTORY_CACHE_NS = 'asset.history';
 
 const DEFAULT_DAYS = 365;
 
@@ -57,9 +60,11 @@ export const createHistorySlice: StateCreator<FinanceState, [], [], HistoryState
   hydrateAssetHistory: async (days: number = DEFAULT_DAYS) => {
     set({ isLoadingAssetHistory: true, assetHistoryError: null });
     try {
-      Logger.debug('HistorySlice', 'Fetching encrypted asset history', { days });
       const points = await fetchAssetHistory(days);
       const snapshots = points.map(toAssetSnapshot);
+
+      // Persist to local cache so charts survive a JS reload
+      void writeCache<AssetSnapshot[]>(HISTORY_CACHE_NS, snapshots);
 
       set({
         assetHistory: snapshots,
@@ -67,14 +72,23 @@ export const createHistorySlice: StateCreator<FinanceState, [], [], HistoryState
         lastFetchedDays: days,
         isLoadingAssetHistory: false,
       });
-
-      Logger.info('HistorySlice', 'Asset history hydrated', {
-        points: snapshots.length,
-        firstDate: snapshots[0]?.date,
-        lastDate: snapshots[snapshots.length - 1]?.date,
-      });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to fetch asset history';
+
+      // Fall back to local encrypted cache
+      const cached = await readCache<AssetSnapshot[]>(HISTORY_CACHE_NS).catch(() => null);
+      if (cached) {
+        Logger.warn('HistorySlice', 'Using cached asset history (CryptoSession unavailable)', {
+          cachedAt: cached.cachedAt,
+          points: cached.data.length,
+        });
+        set({
+          assetHistory: cached.data,
+          isLoadingAssetHistory: false,
+        });
+        return;
+      }
+
       Logger.warn('HistorySlice', 'Asset history hydration failed', { message });
       set({ isLoadingAssetHistory: false, assetHistoryError: message });
     }

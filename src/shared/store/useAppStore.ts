@@ -36,6 +36,8 @@ import {
 } from '../../lib/api/auth';
 import { setAuthTokenProvider } from '../../lib/api/client';
 import { migrateLegacyTokenToSecureStore, secureAuthTokenStore } from '../../lib/secureStorage';
+import { clearAllCache, deleteCache } from '../../lib/cache/dataCache';
+import { deleteCacheKey } from '../../lib/cache/cacheKey';
 import { clearCryptoSession } from '../../lib/crypto/session';
 import {
   createPlaidLinkToken,
@@ -250,6 +252,8 @@ export const useAppStore = create<AppState>((set, get) => {
       }
       clearCryptoSession();
       await secureAuthTokenStore.clear();
+      // Clear local data cache so the next user doesn't see stale data
+      void clearAllCache();
 
       useFinanceStore.getState().clearPlaidFinanceData();
       useFinanceStore.getState().clearAssetHistory();
@@ -273,6 +277,8 @@ export const useAppStore = create<AppState>((set, get) => {
       await deleteCurrentAccount();
       clearCryptoSession();
       await secureAuthTokenStore.clear();
+      void clearAllCache();
+      void deleteCacheKey();
 
       const finance = useFinanceStore.getState();
       finance.setAccounts([]);

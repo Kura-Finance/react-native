@@ -17,6 +17,17 @@ import {
 } from '../../../lib/api/plaid';
 import { KuraApiError } from '../../../lib/api/errors';
 import Logger from '../../utils/Logger';
+import { readCache, writeCache } from '../../../lib/cache/dataCache';
+
+const PLAID_CACHE_NS = 'plaid.snapshot';
+
+interface PlaidCacheShape {
+  accounts: PlaidAccount[];
+  transactions: PlaidTransaction[];
+  investmentAccounts: PlaidInvestmentAccount[];
+  investments: PlaidInvestment[];
+  lastSyncedAt: string | null;
+}
 import {
   Account,
   AccountBucket,
@@ -110,17 +121,17 @@ export const createPlaidSlice: StateCreator<FinanceState, [], [], PlaidState> = 
   hydratePlaidFinanceData: async (_token: string, _refresh: boolean = false) => {
     try {
       set({ isLoadingPlaidData: true, plaidError: null });
-      Logger.debug('PlaidSlice', 'Fetching encrypted Plaid snapshot');
 
       const snapshot = await fetchPlaidFinanceSnapshot();
 
-      Logger.info('PlaidSlice', 'Plaid snapshot fetched + decrypted', {
-        accountsCount: snapshot.accounts.length,
-        transactionsCount: snapshot.transactions.length,
-        investmentAccountsCount: snapshot.investmentAccounts.length,
-        investmentsCount: snapshot.investments.length,
+      // Persist plaintext to local encrypted cache so data survives a JS reload
+      // even when the CryptoSession is not available.
+      void writeCache<PlaidCacheShape>(PLAID_CACHE_NS, {
+        accounts: snapshot.accounts,
+        transactions: snapshot.transactions,
+        investmentAccounts: snapshot.investmentAccounts,
+        investments: snapshot.investments,
         lastSyncedAt: snapshot.lastSyncedAt,
-        decryptionFailures: snapshot.decryptionFailureCount,
       });
 
       const nextAccounts = snapshot.accounts.map(toStoreAccount);
@@ -151,6 +162,36 @@ export const createPlaidSlice: StateCreator<FinanceState, [], [], PlaidState> = 
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to fetch Plaid finance data';
       const code = error instanceof KuraApiError ? error.code : undefined;
+
+      // Try to load from local encrypted cache (survives CryptoSession loss after JS reload).
+      const cached = await readCache<PlaidCacheShape>(PLAID_CACHE_NS).catch(() => null);
+      if (cached) {
+        Logger.warn('PlaidSlice', 'Using cached Plaid data (CryptoSession unavailable)', {
+          cachedAt: cached.cachedAt,
+        });
+        const nextAccounts = cached.data.accounts.map(toStoreAccount);
+        const nextTransactions = cached.data.transactions.map(toStoreTransaction);
+        const nextPlaidInvAccounts = cached.data.investmentAccounts.map(toStoreInvestmentAccount);
+        const nextPlaidInvestments = cached.data.investments.map(toStoreInvestment);
+        set((state) => {
+          const nonPlaidAccounts = state.investmentAccounts.filter(
+            (a) => a.type === 'Web3 Wallet' || a.type === 'Exchange',
+          );
+          const nonPlaidInvestments = state.investments.filter((i) =>
+            nonPlaidAccounts.some((a) => a.id === i.accountId),
+          );
+          return {
+            accounts: nextAccounts,
+            transactions: nextTransactions,
+            investmentAccounts: [...nextPlaidInvAccounts, ...nonPlaidAccounts],
+            investments: [...nextPlaidInvestments, ...nonPlaidInvestments],
+            isLoadingPlaidData: false,
+            cacheSource: `Cached at ${cached.cachedAt}`,
+          };
+        });
+        return; // served from cache — don't throw
+      }
+
       Logger.warn('PlaidSlice', 'Failed to hydrate Plaid data', { message, code });
       set({ isLoadingPlaidData: false, plaidError: message });
 
