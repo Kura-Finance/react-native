@@ -1,4 +1,6 @@
-import { ExchangeName } from '../../api/exchangeApi';
+import type { ExchangeName as _ExchangeName } from '../../../lib/api/exchange';
+// Re-export for legacy consumers; new code should import from `lib/api/exchange`.
+export type ExchangeName = _ExchangeName;
 
 // ============================================================================
 // Refresh Info Type
@@ -15,24 +17,62 @@ export interface RefreshInfo {
 // 基礎資料型別
 // ============================================================================
 
+/**
+ * Store-facing finance types.
+ *
+ * The Phase 3 encrypted endpoint (`/api/plaid/finance-snapshot/encrypted`)
+ * returns rows whose sensitive fields ship as `payloadCiphertext`. The Plaid
+ * lib decrypts them and `plaidSlice.hydratePlaidFinanceData` projects the
+ * result onto these shapes so the existing dashboard / investment screens
+ * don't have to know about encryption.
+ *
+ * `id` (store) maps to `accountId` / `transactionId` / `investmentId` on the
+ * wire — keep the `id` field name here to avoid a sweep through every UI
+ * component in PR-B.
+ */
+
+export type BankingAccountType = 'checking' | 'saving' | 'credit' | 'crypto' | 'investment';
+export type AccountBucket = 'banking' | 'investment';
+
 export interface Account {
   id: string;
   name: string;
   balance: number;
-  type: 'checking' | 'saving' | 'credit' | 'crypto';
+  type: BankingAccountType;
   logo: string;
+  /** Phase 3 metadata */
+  bucket?: AccountBucket;
+  plaidItemId?: string | null;
+  institutionName?: string;
+  plaidLogo?: string;
+  apy?: number;
+  mask?: string;
+  cachedAt?: string;
 }
 
 export interface Transaction {
   id: string | number;
   accountId: string;
   accountName: string;
-  accountType: 'checking' | 'saving' | 'credit' | 'crypto';
+  accountType: BankingAccountType;
   amount: string;
   date: string;
   merchant: string;
+  /** Loosened from `'credit'|'deposit'|'transfer'` — backend stores Plaid raw values. */
+  type: string;
   category: string;
-  type: 'credit' | 'deposit' | 'transfer';
+  month?: string;
+  isPending?: boolean;
+  isRecurring?: boolean;
+  isSubscription?: boolean;
+  personalFinanceCategory?: string;
+  recurringFrequency?: string;
+  enrichedMerchantName?: string;
+  merchantLogo?: string;
+  plaidMerchantLogo?: string;
+  merchantCategory?: string;
+  plaidItemId?: string | null;
+  cachedAt?: string;
 }
 
 export interface InvestmentAccount {
@@ -40,7 +80,12 @@ export interface InvestmentAccount {
   name: string;
   type: 'Broker' | 'Exchange' | 'Web3 Wallet';
   logo: string;
+  institutionName?: string;
+  plaidLogo?: string;
+  cachedAt?: string;
 }
+
+export type InvestmentHoldingType = 'crypto' | 'stock' | 'etf' | 'other';
 
 export interface Investment {
   id: string;
@@ -49,20 +94,26 @@ export interface Investment {
   name: string;
   holdings: number;
   currentPrice: number;
-  change24h: number; // 24小時價格變化百分比
-  usdValue: number; // 持倉總USD價值 (holdings * currentPrice)
-  type: 'crypto' | 'stock' | 'etf';
+  change24h: number;
+  usdValue: number;
+  type: InvestmentHoldingType;
   logo: string;
+  cachedAt?: string;
 }
 
 export interface ExchangeAccount {
   id: string;
-  exchange: ExchangeName;
-  exchangeDisplayName: string; // Display name e.g., "Binance"
+  /**
+   * Lowercase exchange id. New backend may return any string (e.g. one of
+   * {@link ExchangeName}); we don't narrow here so future exchanges don't
+   * require a UI compile change.
+   */
+  exchange: string;
+  exchangeDisplayName: string;
   isVerified: boolean;
   isActive: boolean;
   lastVerifiedAt: string;
-  icon: string; // URL to exchange icon
+  icon: string;
 }
 
 export interface ExchangeBalance {
@@ -73,11 +124,16 @@ export interface ExchangeBalance {
 }
 
 export interface AssetSnapshot {
-  timestamp: number; // Unix timestamp in milliseconds
-  totalAssets: number; // 总资产（USD）
-  bankingBalance: number; // 银行账户总余额
-  investmentValue: number; // 投资总价值
-  cryptoValue: number; // 加密货币总价值
+  /** Unix ms (start of UTC day for the point). */
+  timestamp: number;
+  /** ISO `YYYY-MM-DD` UTC. */
+  date: string;
+  /** Sum of all four base metrics. */
+  totalAssets: number;
+  cashFlow: number;
+  plaidInvestment: number;
+  cryptoSpot: number;
+  defiProtocol: number;
 }
 
 // ============================================================================
@@ -176,12 +232,27 @@ export interface Web3State {
 export interface HistoryState {
   // Data
   assetHistory: AssetSnapshot[];
+  /** Unix ms when assetHistory was last hydrated from backend. */
   lastRecordedTime: number | null;
+  /** Last days window we asked for (used to decide if a refetch is needed). */
+  lastFetchedDays: number | null;
+  isLoadingAssetHistory: boolean;
+  assetHistoryError: string | null;
 
   // Actions
-  recordAssetSnapshot: () => void;
-  getAssetSnapshotsByTimeRange: (days: number) => AssetSnapshot[];
+  /**
+   * Fetch `/api/assets/history/encrypted?days=...`, decrypt every row, then
+   * aggregate to one point per UTC day with the four base-metric breakdown.
+   *
+   * Defaults to 365 days; aggregation does forward-fill for missing days.
+   */
+  hydrateAssetHistory: (days?: number) => Promise<void>;
   clearAssetHistory: () => void;
+  /**
+   * Compute the user's "right now" total assets from live store state
+   * (Plaid investments + connected exchange balances). Independent of the
+   * historical snapshots; used for the performance card's current value.
+   */
   calculateTotalAssets: () => number;
 }
 

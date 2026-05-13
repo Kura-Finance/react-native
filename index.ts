@@ -1,6 +1,11 @@
 // 💡 必须是第一个导入 - 为 React Native 设置 WalletConnect 所需的 polyfills
 import '@walletconnect/react-native-compat';
 
+// Polyfill global.crypto.subtle BEFORE any module that uses tssrp6a (SRP-6a)
+// or other WebCrypto-dependent libraries.
+// react-native-get-random-values only provides getRandomValues, not subtle.
+import './src/lib/polyfills/cryptoSubtle';
+
 import { registerRootComponent } from 'expo';
 
 import App from './App';

@@ -6,89 +6,129 @@ import {
   Switch,
   Alert,
   TouchableOpacity,
+  ActivityIndicator,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
 import { useNotificationStore } from '../../../shared/store/notification';
-import {
-  getNotificationSettings,
-  updateNotificationSettings as updateNotificationSettingsApi,
-} from '../../../shared/api/notificationApi';
+import type { NotificationPreferences } from '../../../shared/store/notification/types';
 import { useAppStore } from '../../../shared/store/useAppStore';
 import Logger from '../../../shared/utils/Logger';
+
+const DEFAULT_PREFERENCES: NotificationPreferences = {
+  enableEmailNotifications: true,
+  enablePushNotifications: true,
+  enableInAppNotifications: true,
+  priceAlertThreshold: 5,
+  accountActivityAlerts: true,
+  transactionAlerts: true,
+  systemAlerts: true,
+  securityAlerts: true,
+  unsubscribeAll: false,
+};
+
+type ToggleKey = Exclude<keyof NotificationPreferences, 'priceAlertThreshold' | 'userId'>;
+
+interface ToggleRow {
+  key: ToggleKey;
+  label: string;
+  description: string;
+}
+
+const CHANNEL_ROWS: ToggleRow[] = [
+  {
+    key: 'enableEmailNotifications',
+    label: 'Email notifications',
+    description: 'Receive notifications by email',
+  },
+  {
+    key: 'enablePushNotifications',
+    label: 'Push notifications',
+    description: 'Receive notifications on this device',
+  },
+  {
+    key: 'enableInAppNotifications',
+    label: 'In-app notifications',
+    description: 'Show notifications inside Kura',
+  },
+];
+
+const CATEGORY_ROWS: ToggleRow[] = [
+  {
+    key: 'transactionAlerts',
+    label: 'Transaction alerts',
+    description: 'Buys, sells, transfers',
+  },
+  {
+    key: 'accountActivityAlerts',
+    label: 'Account activity',
+    description: 'Logins, profile + email changes',
+  },
+  {
+    key: 'systemAlerts',
+    label: 'System messages',
+    description: 'Service announcements + maintenance',
+  },
+  {
+    key: 'securityAlerts',
+    label: 'Security alerts',
+    description: 'Suspicious activity, key rotations',
+  },
+];
+
+const UNSUBSCRIBE_ROW: ToggleRow = {
+  key: 'unsubscribeAll',
+  label: 'Unsubscribe from all',
+  description: 'Mute every channel until manually re-enabled',
+};
 
 export default function NotificationSettingsScreen() {
   const insets = useSafeAreaInsets();
   const authToken = useAppStore((state) => state.authToken);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const navigation = useNavigation<any>();
 
-  const settings = useNotificationStore((state) => state.settings);
-  const updateSettings = useNotificationStore((state) => state.updateSettings);
+  const remotePreferences = useNotificationStore((state) => state.preferences);
+  const loadPreferences = useNotificationStore((state) => state.loadPreferences);
+  const updatePreferences = useNotificationStore((state) => state.updatePreferences);
 
-  const [localSettings, setLocalSettings] = useState(settings);
+  const [local, setLocal] = useState<NotificationPreferences>(remotePreferences ?? DEFAULT_PREFERENCES);
+  const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
 
   useEffect(() => {
-    loadSettings();
-  }, [authToken]);
-
-  const loadSettings = async () => {
     if (!authToken) return;
+    setIsLoading(true);
+    void loadPreferences().finally(() => setIsLoading(false));
+  }, [authToken, loadPreferences]);
 
+  useEffect(() => {
+    if (remotePreferences) setLocal(remotePreferences);
+  }, [remotePreferences]);
+
+  const handleToggle = async (key: ToggleKey) => {
+    const next = !local[key];
+    const prev = local;
+    const optimistic: NotificationPreferences = { ...local, [key]: next };
+    setLocal(optimistic);
+
+    setIsSaving(true);
     try {
-      const response = await getNotificationSettings(authToken);
-      updateSettings(response.settings);
-      setLocalSettings(response.settings);
+      await updatePreferences({ [key]: next });
     } catch (error) {
-      Logger.error('NotificationSettings', 'Failed to load settings', {
-        error: error instanceof Error ? error.message : 'Unknown error',
-      });
-    }
-  };
-
-  const handleToggle = async (key: keyof typeof localSettings) => {
-    const newValue = !localSettings[key];
-    setLocalSettings({
-      ...localSettings,
-      [key]: newValue,
-    });
-
-    if (!authToken) return;
-
-    try {
-      setIsSaving(true);
-      await updateNotificationSettingsApi(authToken, {
-        [key]: newValue,
-      });
-      updateSettings({
-        [key]: newValue,
-      });
-      Logger.info('NotificationSettings', 'Setting updated', { key, value: newValue });
-    } catch (error) {
-      // Revert on error
-      setLocalSettings({
-        ...localSettings,
-        [key]: !newValue,
-      });
-      const errorMessage =
-        error instanceof Error ? error.message : 'Failed to update setting';
-      Alert.alert('Error', errorMessage);
-      Logger.error('NotificationSettings', 'Failed to update setting', {
-        error: errorMessage,
-      });
+      setLocal(prev);
+      const message = error instanceof Error ? error.message : 'Failed to update preference';
+      Alert.alert('Error', message);
+      Logger.warn('NotificationSettings', 'update failed', { key, error: message });
     } finally {
       setIsSaving(false);
     }
   };
 
-  const renderSettingItem = (
-    key: keyof typeof localSettings,
-    label: string,
-    description: string
-  ) => (
+  const renderToggle = (row: ToggleRow) => (
     <View
-      key={key}
+      key={row.key}
       style={{
         flexDirection: 'row',
         alignItems: 'center',
@@ -100,15 +140,13 @@ export default function NotificationSettingsScreen() {
     >
       <View style={{ flex: 1, marginRight: 12 }}>
         <Text style={{ color: '#FFFFFF', fontSize: 16, fontWeight: '600', marginBottom: 4 }}>
-          {label}
+          {row.label}
         </Text>
-        <Text style={{ color: '#999999', fontSize: 12 }}>
-          {description}
-        </Text>
+        <Text style={{ color: '#999999', fontSize: 12 }}>{row.description}</Text>
       </View>
       <Switch
-        value={localSettings[key]}
-        onValueChange={() => handleToggle(key)}
+        value={local[row.key]}
+        onValueChange={() => handleToggle(row.key)}
         disabled={isSaving}
         trackColor={{ false: '#333333', true: '#8B5CF6' }}
         thumbColor="#FFFFFF"
@@ -124,60 +162,69 @@ export default function NotificationSettingsScreen() {
         paddingTop: Math.max(insets.top, 10),
       }}
     >
-      {/* Header */}
       <View style={{ paddingHorizontal: 24, paddingVertical: 16, flexDirection: 'row', alignItems: 'center' }}>
-        <TouchableOpacity
-          onPress={() => navigation.goBack()}
-          style={{ marginRight: 12 }}
-        >
+        <TouchableOpacity onPress={() => navigation.goBack()} style={{ marginRight: 12 }}>
           <Ionicons name="arrow-back" size={24} color="#FFFFFF" />
         </TouchableOpacity>
-        <Text style={{ color: '#FFFFFF', fontSize: 24, fontWeight: 'bold' }}>
-          Settings
-        </Text>
+        <Text style={{ color: '#FFFFFF', fontSize: 24, fontWeight: 'bold' }}>Settings</Text>
       </View>
 
-      {/* Settings List */}
-      <ScrollView
-        style={{ flex: 1, paddingHorizontal: 24 }}
-        contentContainerStyle={{ paddingBottom: 20 }}
-        showsVerticalScrollIndicator={false}
-      >
-        {/* Transaction Alerts */}
-        {renderSettingItem(
-          'enableTransactionAlerts',
-          'Transaction Alerts',
-          'Get notified about buy, sell, and transfer events'
-        )}
+      {isLoading ? (
+        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+          <ActivityIndicator color="#8B5CF6" />
+        </View>
+      ) : (
+        <ScrollView
+          style={{ flex: 1, paddingHorizontal: 24 }}
+          contentContainerStyle={{ paddingBottom: 32 }}
+          showsVerticalScrollIndicator={false}
+        >
+          <Text
+            style={{
+              color: '#666666',
+              fontSize: 12,
+              fontWeight: '600',
+              textTransform: 'uppercase',
+              letterSpacing: 0.4,
+              marginTop: 8,
+              marginBottom: 8,
+            }}
+          >
+            Channels
+          </Text>
+          {CHANNEL_ROWS.map(renderToggle)}
 
-        {/* Account Changes */}
-        {renderSettingItem(
-          'enableAccountChanges',
-          'Account Changes',
-          'Notifications about account updates and changes'
-        )}
+          <Text
+            style={{
+              color: '#666666',
+              fontSize: 12,
+              fontWeight: '600',
+              textTransform: 'uppercase',
+              letterSpacing: 0.4,
+              marginTop: 24,
+              marginBottom: 8,
+            }}
+          >
+            Categories
+          </Text>
+          {CATEGORY_ROWS.map(renderToggle)}
 
-        {/* System Messages */}
-        {renderSettingItem(
-          'enableSystemMessages',
-          'System Messages',
-          'Important system and security notifications'
-        )}
-
-        {/* Price Alerts */}
-        {renderSettingItem(
-          'enablePriceAlerts',
-          'Price Alerts',
-          'Price movement alerts and reminders'
-        )}
-
-        {/* Push Notifications */}
-        {renderSettingItem(
-          'enablePushNotifications',
-          'Push Notifications',
-          'Receive notifications on your device'
-        )}
-      </ScrollView>
+          <Text
+            style={{
+              color: '#666666',
+              fontSize: 12,
+              fontWeight: '600',
+              textTransform: 'uppercase',
+              letterSpacing: 0.4,
+              marginTop: 24,
+              marginBottom: 8,
+            }}
+          >
+            Master switch
+          </Text>
+          {renderToggle(UNSUBSCRIBE_ROW)}
+        </ScrollView>
+      )}
     </View>
   );
 }

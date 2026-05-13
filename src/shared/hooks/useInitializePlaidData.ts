@@ -4,33 +4,49 @@ import { useAppStore } from '../store/useAppStore';
 import Logger from '../utils/Logger';
 
 /**
- * Hook for initial Plaid data load on component mount
- * Responsibility: Load Plaid data only once if not already loaded
- * This replaces the App startup auto-load when user navigates to Dashboard/Investment
+ * One-shot bootstrap hook used by Dashboard / Investment screens.
+ *
+ * Loads (in this order) on first mount when no data is present yet:
+ *   1. Encrypted Plaid finance snapshot
+ *   2. Asset history (server-recorded, decrypted client-side)
+ *
+ * Both fetches are independent — a failure in one doesn't block the other.
  */
 export function useInitializePlaidData() {
   const hydratePlaidFinanceData = useFinanceStore((state) => state.hydratePlaidFinanceData);
+  const hydrateAssetHistory = useFinanceStore((state) => state.hydrateAssetHistory);
   const accounts = useFinanceStore((state) => state.accounts);
+  const assetHistory = useFinanceStore((state) => state.assetHistory);
   const authToken = useAppStore((state) => state.authToken);
 
   useEffect(() => {
-    const loadData = async () => {
-      // Only load if:
-      // 1. We have auth token
-      // 2. No accounts are loaded yet (first time)
-      if (!authToken || accounts.length > 0) {
-        return;
-      }
+    if (!authToken) return;
 
+    const loadPlaid = async () => {
+      if (accounts.length > 0) return;
       try {
-        Logger.debug('useInitializePlaidData', 'Loading Plaid data on first mount');
         await hydratePlaidFinanceData(authToken);
-        Logger.info('useInitializePlaidData', 'Plaid data loaded on component mount');
       } catch (error) {
-        Logger.warn('useInitializePlaidData', 'Failed to initialize Plaid data', error);
+        Logger.warn('useInitializePlaidData', 'Plaid hydration failed', { error: String(error) });
       }
     };
 
-    loadData();
-  }, [authToken, accounts.length, hydratePlaidFinanceData]);
+    const loadAssetHistory = async () => {
+      if (assetHistory.length > 0) return;
+      try {
+        await hydrateAssetHistory();
+      } catch (error) {
+        Logger.warn('useInitializePlaidData', 'Asset history hydration failed', { error: String(error) });
+      }
+    };
+
+    void loadPlaid();
+    void loadAssetHistory();
+  }, [
+    authToken,
+    accounts.length,
+    assetHistory.length,
+    hydratePlaidFinanceData,
+    hydrateAssetHistory,
+  ]);
 }

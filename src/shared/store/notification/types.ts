@@ -1,33 +1,30 @@
-// Notification types and interfaces
+/**
+ * Re-export from the new lib for legacy code paths.
+ *
+ * The store now holds `Notification` / `NotificationPreferences` shapes
+ * straight from the wire; UI never has to translate from a custom mobile
+ * type to the backend one.
+ */
 
-export type NotificationType = 'transaction' | 'account' | 'system' | 'price-alert';
-export type NotificationPriority = 'low' | 'normal' | 'high';
-export type NotificationStatus = 'unread' | 'read';
+export type {
+  Notification,
+  NotificationCategory,
+  NotificationStatus,
+} from '../../../lib/api/notification';
+export type {
+  NotificationPreferencesV1 as NotificationPreferences,
+  NotificationPriority,
+  NotificationType,
+} from '../../../lib/api/notification';
 
-export interface Notification {
-  id: string;
-  type: NotificationType;
-  title: string;
-  message: string;
-  priority: NotificationPriority;
-  status: NotificationStatus;
-  timestamp: string; // ISO 8601
-  icon?: string;
-  actionUrl?: string; // Deep link to action
-  metadata?: Record<string, any>;
-}
-
-export interface NotificationSettings {
-  enableTransactionAlerts: boolean;
-  enableAccountChanges: boolean;
-  enableSystemMessages: boolean;
-  enablePriceAlerts: boolean;
-  enablePushNotifications: boolean;
-}
+import type {
+  Notification,
+  NotificationPreferencesV1 as NotificationPreferences,
+} from '../../../lib/api/notification';
 
 export interface NotificationState {
   notifications: Notification[];
-  settings: NotificationSettings;
+  preferences: NotificationPreferences | null;
   isLoading: boolean;
   error: string | null;
   unreadCount: number;

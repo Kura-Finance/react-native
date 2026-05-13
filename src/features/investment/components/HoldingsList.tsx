@@ -11,7 +11,7 @@ interface Investment {
   currentPrice: number;
   change24h: number;
   usdValue: number; // USD value from exchange data
-  type: 'crypto' | 'stock' | 'etf';
+  type: 'crypto' | 'stock' | 'etf' | 'other';
 }
 
 type AssetClassFilter = 'All' | 'Stock' | 'ETF' | 'Crypto';

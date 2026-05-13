@@ -23,11 +23,11 @@ import { useAppStore } from '../store/useAppStore';
 import { useFinanceStore } from '../store/useFinanceStore';
 import { useExchangeStore } from '../store/useExchangeStore';
 import {
-  connectExchangeAccount,
+  connectExchange as connectExchangeAccount,
   getSupportedExchanges,
-  ExchangeCredentials,
-  SupportedExchange,
-} from '../api/exchangeApi';
+  type ExchangeCredentials,
+  type SupportedExchange,
+} from '../../lib/api/exchange';
 
 interface ExchangeLinkModalProps {
   isOpen: boolean;
@@ -65,7 +65,7 @@ export default function ExchangeLinkModal({
         Logger.debug('ExchangeLinkModal', 'Loading supported exchanges');
         
         // Pass authToken if available (convert null to undefined)
-        const exchanges = await getSupportedExchanges(authToken ?? undefined);
+        const exchanges = await getSupportedExchanges();
         
         Logger.debug('ExchangeLinkModal', 'Exchanges received from API', {
           count: exchanges.length,
@@ -160,7 +160,7 @@ export default function ExchangeLinkModal({
         exchange: selectedExchange.id,
       });
 
-      const connectedAccount = await connectExchangeAccount(credentials, authToken);
+      const { account: connectedAccount } = await connectExchangeAccount(credentials);
 
       // Validate backend response contains required fields
       if (!connectedAccount?.id || !connectedAccount?.exchange) {
@@ -173,8 +173,17 @@ export default function ExchangeLinkModal({
         return;
       }
 
-      // Add to both stores - connectedAccount already has all required fields
-      addExchangeAccount(connectedAccount);
+      // Add to both stores. The finance store keeps the legacy `isActive` /
+      // `lastVerifiedAt` fields; default them when the wire omits them.
+      addExchangeAccount({
+        id: connectedAccount.id,
+        exchange: connectedAccount.exchange,
+        exchangeDisplayName: connectedAccount.exchangeDisplayName,
+        icon: connectedAccount.icon,
+        isVerified: connectedAccount.isVerified,
+        isActive: connectedAccount.isActive ?? true,
+        lastVerifiedAt: connectedAccount.lastVerifiedAt ?? new Date().toISOString(),
+      });
       addExchangeAccountToStore(connectedAccount);
 
       // Attempt to fetch initial balances

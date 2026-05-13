@@ -4,15 +4,15 @@ import { useTranslation } from 'react-i18next';
 import { useFinanceStore } from '../../../shared/store/useFinanceStore';
 import AccountsList from '../components/AccountsList';
 import ActivityContainer from '../components/ActivityContainer';
-import TransactionsDetailModal from '../components/TransactionsDetailModal';
 import { useInitializePlaidData } from '../../../shared/hooks/useInitializePlaidData';
 import { useRefreshDashboardData } from '../hooks/useRefreshDashboardData';
+import { useTabNavigator } from '../../../shared/context/TabNavigatorContext';
 
 export default function DashboardScreen() {
   const { t } = useTranslation();
+  const { switchToTab } = useTabNavigator();
   // State Management - UI control
   const [selectedAccountId, setSelectedAccountId] = useState<string>('all');
-  const [showTransactionsDetail, setShowTransactionsDetail] = useState(false);
 
   // Data Management - from Zustand stores
   const accounts = useFinanceStore((state) => state.accounts);
@@ -79,7 +79,7 @@ export default function DashboardScreen() {
             transactionHeader={transactionHeader}
             isAiOptedIn={isAiOptedIn}
             onToggleAiOptIn={() => {}}
-            onViewAll={() => setShowTransactionsDetail(true)}
+            onViewAll={() => switchToTab('Transaction')}
           />
         </View>
 
@@ -112,13 +112,6 @@ export default function DashboardScreen() {
         <View style={{ height: 100 }} />
       </ScrollView>
 
-      {/* Transactions Detail Modal */}
-      <TransactionsDetailModal
-        isOpen={showTransactionsDetail}
-        onClose={() => setShowTransactionsDetail(false)}
-        account={selectedAccount}
-        transactions={displayTransactions}
-      />
     </View>
   );
 }

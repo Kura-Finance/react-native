@@ -1,6 +1,6 @@
 import '@walletconnect/react-native-compat';
 import React, { useEffect, useState } from 'react';
-import { View, ActivityIndicator } from 'react-native';
+import { View, ActivityIndicator, Text } from 'react-native';
 import { NavigationContainer, DefaultTheme } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { StatusBar } from 'expo-status-bar';
@@ -9,7 +9,9 @@ import { I18nextProvider } from 'react-i18next';
 import i18n from './src/shared/locales/i18n'; // Initialize i18n
 import { useAppStore } from './src/shared/store/useAppStore';
 import Logger from './src/shared/utils/Logger';
-import { getBackendBaseUrl } from './src/shared/api/authApi';
+import { getApiBaseUrl } from './src/lib/api/baseUrl';
+import { pingHealth } from './src/lib/api/system';
+import { installAppLock } from './src/lib/security/appLock';
 import { initializeRevenueCat } from './src/shared/config/RevenueCatConfig';
 import Header from './src/components/Header';
 import TabNavigator from './src/components/TabNavigator';
@@ -132,17 +134,15 @@ export default function App() {
   const authStatus = useAppStore((state) => state.authStatus);
   const hydrateFromStorage = useAppStore((state) => state.hydrateFromStorage);
   const [isHydrated, setIsHydrated] = useState(false);
+  const [backendOffline, setBackendOffline] = useState(false);
 
   useEffect(() => {
     const initAuth = async () => {
       try {
         Logger.debug('App', 'Starting application initialization');
-        Logger.debug('App', 'Backend URL', { url: getBackendBaseUrl() });
-        Logger.debug('App', 'Request diagnostics enabled');
-        
-        // Initialize RevenueCat for in-app purchases
+        Logger.debug('App', 'API base URL', { url: getApiBaseUrl() });
+
         await initializeRevenueCat();
-        
         await hydrateFromStorage();
         Logger.info('App', 'Authentication initialized');
       } catch (error) {
@@ -153,6 +153,26 @@ export default function App() {
     };
 
     initAuth();
+
+    // Background lock: clear crypto session if app stays backgrounded for 5+ min.
+    const uninstallLock = installAppLock();
+
+    // Best-effort health ping — surfaces an offline banner without blocking boot.
+    void pingHealth(5_000).then((result) => {
+      if (!result.ok) {
+        Logger.warn('App', 'Backend health ping failed', {
+          latencyMs: result.latencyMs,
+          error: result.error,
+        });
+        setBackendOffline(true);
+      } else {
+        setBackendOffline(false);
+      }
+    });
+
+    return () => {
+      uninstallLock();
+    };
   }, [hydrateFromStorage]);
 
   if (!isHydrated) {
@@ -171,6 +191,20 @@ export default function App() {
         <AppKitProvider instance={appKit}>
           <NavigationContainer theme={KuraDarkTheme}>
             <StatusBar style="light" translucent={true} />
+            {backendOffline ? (
+              <View
+                style={{
+                  paddingTop: 44,
+                  paddingHorizontal: 16,
+                  paddingBottom: 8,
+                  backgroundColor: '#7F1D1D',
+                }}
+              >
+                <Text style={{ color: '#FECACA', fontSize: 12, textAlign: 'center' }}>
+                  Connection issue — some data may be out of date.
+                </Text>
+              </View>
+            ) : null}
             {authStatus === 'authenticated' ? <MainNavigator /> : <AuthNavigator />}
           </NavigationContainer>
         </AppKitProvider>

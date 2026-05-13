@@ -10,10 +10,11 @@ import Logger from '../../../shared/utils/Logger';
  */
 export function useRefreshInvestmentData() {
   const [refreshing, setRefreshing] = useState(false);
-  const hydratePlaidFinanceData = useFinanceStore((state: any) => state.hydratePlaidFinanceData);
-  const fetchExchangeBalances = useExchangeStore((state: any) => state.fetchExchangeBalances);
-  const exchangeAccounts = useExchangeStore((state: any) => state.exchangeAccounts);
-  const authToken = useAppStore((state: any) => state.authToken);
+  const hydratePlaidFinanceData = useFinanceStore((state) => state.hydratePlaidFinanceData);
+  const hydrateAssetHistory = useFinanceStore((state) => state.hydrateAssetHistory);
+  const fetchExchangeBalances = useExchangeStore((state) => state.fetchExchangeBalances);
+  const exchangeAccounts = useExchangeStore((state) => state.exchangeAccounts);
+  const authToken = useAppStore((state) => state.authToken);
 
   const handleRefresh = useCallback(async () => {
     if (!authToken) {
@@ -23,31 +24,28 @@ export function useRefreshInvestmentData() {
 
     setRefreshing(true);
     try {
-      Logger.debug('useRefreshInvestmentData', 'Refreshing investment data with forced Plaid refresh');
-
-      // Refresh Plaid data with refresh=true to force update from API (consumes daily quota)
+      // Phase 3: encrypted snapshot is cache-driven; backend updates via webhooks.
+      // Mobile just refetches what the server has.
       await hydratePlaidFinanceData(authToken, true);
-      Logger.info('useRefreshInvestmentData', 'Plaid data refreshed from API');
 
-      // Refresh Exchange data for all connected accounts
       if (exchangeAccounts.length > 0) {
-        Logger.debug('useRefreshInvestmentData', `Refreshing ${exchangeAccounts.length} exchange accounts`);
-        const exchangeRefreshPromises = exchangeAccounts.map((account: any) =>
-          fetchExchangeBalances(account.id, authToken).catch((error: any) => {
-            Logger.warn('useRefreshInvestmentData', `Failed to refresh exchange account ${account.id}`, error);
-          })
+        const exchangeRefreshPromises = exchangeAccounts.map((account) =>
+          fetchExchangeBalances(account.id, authToken).catch((error: unknown) => {
+            Logger.warn('useRefreshInvestmentData', `Failed to refresh exchange ${account.id}`, {
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }),
         );
         await Promise.all(exchangeRefreshPromises);
-        Logger.info('useRefreshInvestmentData', 'Exchange data refreshed');
       }
 
-      Logger.info('useRefreshInvestmentData', 'All investment data refreshed successfully');
+      await hydrateAssetHistory();
     } catch (error) {
       Logger.error('useRefreshInvestmentData', 'Failed to refresh investment data', error);
     } finally {
       setRefreshing(false);
     }
-  }, [authToken, hydratePlaidFinanceData, fetchExchangeBalances, exchangeAccounts]);
+  }, [authToken, hydratePlaidFinanceData, hydrateAssetHistory, fetchExchangeBalances, exchangeAccounts]);
 
   return {
     refreshing,

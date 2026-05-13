@@ -1,40 +1,68 @@
+/**
+ * Top-level app store.
+ *
+ * Auth in Kura mobile is Phase 3 Zero-Access E2EE:
+ *   - login uses SRP-6a (`tssrp6a`), password never leaves the device.
+ *   - register / reset upload SRP salt + verifier + KEK salt + encryptedDataKey
+ *     to the backend; no plaintext password is sent.
+ *   - the user's X25519 keypair (encryptedPrivateKey wrapped under a Argon2id-
+ *     derived KEK) lives at `/api/auth/keys/*`. On every successful login we
+ *     bootstrap the in-memory {@link CryptoSession}, performing lazy recovery
+ *     (rotate or fresh setup) when the wrap can't be opened.
+ *   - the JWT token is stored in `expo-secure-store` (never AsyncStorage).
+ *
+ * Legacy paths (`POST /api/auth/login`, `/register/resend-code`,
+ * `/api/auth/change-password`) are removed: the backend no longer serves them.
+ */
+
 import { create } from 'zustand';
 import {
-  setStoredAuthToken,
-  clearStoredAuthToken,
-  getStoredAuthToken,
+  bootstrapSessionAfterLogin,
+  bootstrapSessionAfterRegistration,
+  confirmEmailChange as confirmEmailChangeApi,
+  deleteCurrentAccount,
   fetchCurrentUserProfile,
+  logoutCurrentSession,
+  requestEmailChange as requestEmailChangeApi,
+  requestPasswordReset as requestPasswordResetApi,
+  requestRegistrationCode,
+  setReferralCode as setReferralCodeApi,
+  srpAuthenticate,
+  srpRegister,
   updateAvatar as updateAvatarApi,
   updateDisplayName as updateDisplayNameApi,
-  requestEmailChange,
-  confirmEmailChange,
-  loginUser,
-  sendVerificationCode as sendVerificationCodeApi,
-  verifyEmailAndRegister as verifyEmailAndRegisterApi,
-  resendVerificationCode as resendVerificationCodeApi,
-  changePassword as changePasswordApi,
-  requestPasswordReset as requestPasswordResetApi,
-  resetPassword as resetPasswordApi,
-  deleteAccount as deleteAccountApi,
-} from '../api/authApi';
+  zkResetPassword,
+  type UserProfileV1,
+} from '../../lib/api/auth';
+import { setAuthTokenProvider } from '../../lib/api/client';
+import { migrateLegacyTokenToSecureStore, secureAuthTokenStore } from '../../lib/secureStorage';
+import { clearCryptoSession } from '../../lib/crypto/session';
 import {
   createPlaidLinkToken,
+  disconnectPlaidItem,
   exchangePlaidPublicToken,
-  disconnectPlaidAccount as disconnectPlaidAccountApi,
-} from '../api/plaidApi';
-import { disconnectExchangeAccount as disconnectExchangeAccountApi } from '../api/exchangeApi';
+} from '../../lib/api/plaid';
+import { disconnectExchange as disconnectExchangeAccountApi } from '../../lib/api/exchange';
 import { fetchExchangeRates, isCacheValid, type ExchangeRates } from '../api/exchangeRateApi';
 import { useFinanceStore } from './useFinanceStore';
 import { type Currency } from '../utils/currencyFormatter';
-import Logger from '../utils/Logger';import { waitForWebhookCompletion } from '../utils/webhookWait';
+import Logger from '../utils/Logger';
+import { waitForWebhookCompletion } from '../utils/webhookWait';
+
 export type BaseCurrency = Currency;
 export type Language = 'en' | 'zh-TW';
 
+/** Local view of the user profile. Mirrors a subset of UserProfileV1. */
 export interface UserProfile {
+  id: string;
   displayName: string;
   email: string;
   avatarUrl: string;
   membershipLabel: string;
+  referCode?: string;
+  referredByCode?: string | null;
+  referralCount?: number;
+  cashbackBalance?: number;
 }
 
 export interface UserPreferences {
@@ -68,751 +96,489 @@ interface AppState {
   exchangeRates: ExchangeRates | null;
   isLoadingExchangeRates: boolean;
 
-  // Auth methods
+  // Auth (SRP)
   login: (email: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
-  deleteAccount: (password: string) => Promise<void>;
-  changePassword: (oldPassword: string, newPassword: string) => Promise<void>;
-  
-  // Registration flow (new)
+  deleteAccount: () => Promise<void>;
+
+  // Registration
   sendVerificationCode: (email: string) => Promise<void>;
-  verifyEmailAndRegister: (email: string, password: string, verificationCode: string) => Promise<void>;
-  resendVerificationCode: (email: string) => Promise<void>;
-  
-  // Password reset flow (updated)
+  verifyEmailAndRegister: (
+    email: string,
+    password: string,
+    verificationCode: string,
+    referralCode?: string,
+  ) => Promise<void>;
+
+  // Password reset (forgot-password flow)
   requestPasswordReset: (email: string) => Promise<void>;
   resetPassword: (email: string, verificationCode: string, newPassword: string) => Promise<void>;
-  
+
+  // Bootstrap
   hydrateFromStorage: () => Promise<void>;
-  
-  // User methods
+  hydrateUserProfile: () => Promise<void>;
+
+  // Profile mutations
   setDisplayName: (displayName: string) => Promise<void>;
+  setReferralCode: (referralCode: string) => Promise<void>;
   requestEmailChange: (newEmail: string) => Promise<{ message: string; expiresIn?: number }>;
-  confirmEmailChange: (verificationCode: string) => Promise<void>;
+  confirmEmailChange: (newEmail: string, verificationCode: string) => Promise<void>;
   updateAvatar: (avatarUrl: string) => Promise<void>;
+
+  // Preferences
   setBaseCurrency: (currency: BaseCurrency) => void;
   setLanguage: (language: Language) => void;
   toggleWeeklyAiSummary: () => void;
   addChatMessage: (message: AppChatMessage) => void;
+
+  // Plaid
   setPlaidLinkToken: (token: string | null) => void;
-  setAuthToken: (token: string | null) => void;
-  clearAuthSession: () => void;
-  hydrateUserProfile: () => Promise<void>;
-  
-  // Exchange rate methods
-  loadExchangeRates: () => Promise<void>;
-  
-  // Plaid methods
   requestPlaidLinkToken: () => Promise<string | null>;
   confirmPlaidExchange: (publicToken: string, institutionName?: string) => Promise<void>;
   disconnectPlaidAccount: (accountId: string) => Promise<void>;
-  
-  // Exchange methods
+
+  // Exchange
   disconnectExchangeAccount: (exchangeAccountId: string) => Promise<void>;
+
+  // Misc
+  loadExchangeRates: () => Promise<void>;
+  setAuthToken: (token: string | null) => void;
+  clearAuthSession: () => void;
 }
 
-// Demo data removed - now using real data from backend
+const DEFAULT_PREFERENCES: UserPreferences = {
+  baseCurrency: 'USD',
+  language: 'en',
+  weeklyAiSummary: false,
+};
 
-export const useAppStore = create<AppState>((set, get) => ({
-  authStatus: 'loading',
-  userProfile: {
-    displayName: '',
-    email: '',
-    avatarUrl: '',
-    membershipLabel: '',
-  },
-  preferences: {
-    baseCurrency: 'USD',
-    language: 'en',
-    weeklyAiSummary: false,
-  },
-  aiInsights: [],
-  chatMessages: [],
-  plaidLinkToken: null,
-  plaidLinkTokenTimestamp: null,
-  authToken: null,
-  authError: null,
-  exchangeRates: null,
-  isLoadingExchangeRates: false,
+const EMPTY_USER_PROFILE: UserProfile = {
+  id: '',
+  displayName: '',
+  email: '',
+  avatarUrl: '',
+  membershipLabel: '',
+};
 
-  // Auth methods
-  login: async (email: string, password: string) => {
-    try {
+function toLocalProfile(remote: UserProfileV1): UserProfile {
+  return {
+    id: remote.id,
+    displayName: remote.displayName,
+    email: remote.email,
+    avatarUrl: remote.avatarUrl,
+    membershipLabel: remote.membershipLabel,
+    referCode: remote.referCode,
+    referredByCode: remote.referredByCode ?? null,
+    referralCount: remote.referralCount,
+    cashbackBalance: remote.cashbackBalance,
+  };
+}
+
+export const useAppStore = create<AppState>((set, get) => {
+  // Wire the API client to read the current authToken from this store. Done
+  // once at store creation; the closure captures `get` from zustand.
+  setAuthTokenProvider(() => get().authToken);
+
+  return {
+    authStatus: 'loading',
+    userProfile: EMPTY_USER_PROFILE,
+    preferences: DEFAULT_PREFERENCES,
+    aiInsights: [],
+    chatMessages: [],
+    plaidLinkToken: null,
+    plaidLinkTokenTimestamp: null,
+    authToken: null,
+    authError: null,
+    exchangeRates: null,
+    isLoadingExchangeRates: false,
+
+    // ─────────────────────────────────────────────────────────────────
+    // Auth (SRP)
+    // ─────────────────────────────────────────────────────────────────
+
+    login: async (email, password) => {
       const normalizedEmail = email.toLowerCase().trim();
-      Logger.debug('AppStore', 'Attempting login', { email: normalizedEmail });
+      Logger.info('AppStore', 'SRP login starting', { email: normalizedEmail });
       set({ authStatus: 'loading', authError: null });
 
-      const response = await loginUser(normalizedEmail, password);
-      await setStoredAuthToken(response.token);
-
-      Logger.info('AppStore', 'Login successful', { email: normalizedEmail });
-      set({
-        authToken: response.token,
-        authStatus: 'authenticated',
-        userProfile: {
-          displayName: response.user.displayName,
-          email: normalizedEmail,
-          avatarUrl: response.user.avatarUrl || '',
-          membershipLabel: response.user.membershipLabel || '',
-        },
-        authError: null,
-        preferences: {
-          baseCurrency: 'USD',
-          language: 'en',
-
-          weeklyAiSummary: false,
-        },
-        aiInsights: [],
-      });
-
-      // Auto-load Plaid data from backend
       try {
-        Logger.debug('AppStore', 'Auto-loading Plaid finance data after login');
-        const hydratePlaidFinanceData = useFinanceStore.getState().hydratePlaidFinanceData;
-        await hydratePlaidFinanceData(response.token);
-        Logger.info('AppStore', 'Plaid finance data auto-loaded after login');
-        
-        // Record asset snapshot for performance tracking
-        const recordAssetSnapshot = useFinanceStore.getState().recordAssetSnapshot;
-        recordAssetSnapshot();
-      } catch (plaidError) {
-        // Plaid data loading is optional - don't fail the login if it fails
-        Logger.warn('AppStore', 'Failed to auto-load Plaid data after login', plaidError);
-      }
+        const { token, user, derivedKeys } = await srpAuthenticate(normalizedEmail, password);
 
-      // Load exchange rates
-      try {
-        await get().loadExchangeRates();
-      } catch (rateError) {
-        Logger.warn('AppStore', 'Failed to load exchange rates after login', rateError);
-      }
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Login failed';
-      Logger.error('AppStore', 'Login failed', { error: errorMessage });
-      set({ authStatus: 'unauthenticated', authError: errorMessage });
-      throw error;
-    }
-  },
+        // Persist token first so the next authenticated /keys/me call works.
+        await secureAuthTokenStore.set(token);
+        set({ authToken: token });
 
-  logout: async () => {
-    try {
+        try {
+          await bootstrapSessionAfterLogin({ derivedKeys });
+        } catch (error) {
+          derivedKeys.dekWrapKey.fill(0);
+          derivedKeys.localCacheKey.fill(0);
+          throw error;
+        }
+
+        set({
+          authStatus: 'authenticated',
+          userProfile: toLocalProfile(user),
+          authError: null,
+          preferences: DEFAULT_PREFERENCES,
+          aiInsights: [],
+        });
+
+        Logger.info('AppStore', 'SRP login successful', { email: normalizedEmail });
+
+        // Optional post-login hydrations — failures here do not unwind auth.
+        void get().loadExchangeRates();
+
+        // Plaid data is now Phase 3 encrypted; until PR-B switches to the
+        // encrypted snapshot endpoint, leave hydration to user-driven refresh.
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Login failed';
+        Logger.warn('AppStore', 'SRP login failed', { message });
+        await secureAuthTokenStore.clear().catch(() => undefined);
+        clearCryptoSession();
+        set({ authStatus: 'unauthenticated', authToken: null, authError: message });
+        throw error;
+      }
+    },
+
+    logout: async () => {
       Logger.info('AppStore', 'Logging out');
-      await clearStoredAuthToken();
-      
-      // Clear all finance store data
+      try {
+        await logoutCurrentSession();
+      } catch {
+        // best-effort
+      }
+      clearCryptoSession();
+      await secureAuthTokenStore.clear();
+
       useFinanceStore.getState().clearPlaidFinanceData();
       useFinanceStore.getState().clearAssetHistory();
-      
+
       set({
         authToken: null,
         authStatus: 'unauthenticated',
-        userProfile: {
-          displayName: '',
-          email: '',
-          avatarUrl: '',
-          membershipLabel: '',
-        },
-        plaidLinkToken: null,
-        authError: null,
-      });
-      Logger.info('AppStore', 'Logout successful');
-    } catch (error) {
-      Logger.error('AppStore', 'Logout failed', error);
-      throw error;
-    }
-  },
-
-  deleteAccount: async (password: string) => {
-    try {
-      const authToken = get().authToken;
-      if (!authToken) {
-        throw new Error('Not authenticated');
-      }
-
-      Logger.info('AppStore', 'Deleting account');
-      await deleteAccountApi(authToken, password);
-      
-      // Clear auth token and reset state
-      await clearStoredAuthToken();
-      set({
-        authToken: null,
-        authStatus: 'unauthenticated',
-        userProfile: {
-          displayName: '',
-          email: '',
-          avatarUrl: '',
-          membershipLabel: '',
-        },
+        userProfile: EMPTY_USER_PROFILE,
         plaidLinkToken: null,
         plaidLinkTokenTimestamp: null,
         authError: null,
       });
+      Logger.info('AppStore', 'Logout complete');
+    },
 
-      // Clear finance store data
-      const financeStore = useFinanceStore.getState();
-      financeStore.setAccounts([]);
-      financeStore.setTransactions([]);
-      financeStore.setInvestmentAccounts([]);
-      financeStore.setInvestments([]);
-      financeStore.clearAssetHistory();
-
-      Logger.info('AppStore', 'Account deleted successfully');
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Failed to delete account';
-      Logger.error('AppStore', 'Delete account failed', { error: errorMessage });
-      throw error;
-    }
-  },
-
-  changePassword: async (oldPassword: string, newPassword: string) => {
-    try {
-      const authToken = get().authToken;
-      if (!authToken) {
+    deleteAccount: async () => {
+      if (!get().authToken) {
         throw new Error('Not authenticated');
       }
+      Logger.info('AppStore', 'Deleting account');
+      await deleteCurrentAccount();
+      clearCryptoSession();
+      await secureAuthTokenStore.clear();
 
-      Logger.debug('AppStore', 'Changing password');
-      await changePasswordApi(authToken, oldPassword, newPassword);
-      Logger.info('AppStore', 'Password changed successfully');
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Password change failed';
-      Logger.error('AppStore', 'Password change failed', { error: errorMessage });
-      throw error;
-    }
-  },
+      const finance = useFinanceStore.getState();
+      finance.setAccounts([]);
+      finance.setTransactions([]);
+      finance.setInvestmentAccounts([]);
+      finance.setInvestments([]);
+      finance.clearAssetHistory();
 
-  requestPasswordReset: async (email: string) => {
-    try {
-      Logger.debug('AppStore', 'Requesting password reset', { email });
-      await requestPasswordResetApi(email);
-      Logger.info('AppStore', 'Password reset code sent', { email });
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Password reset request failed';
-      Logger.error('AppStore', 'Password reset request failed', { error: errorMessage });
-      throw error;
-    }
-  },
-
-  resetPassword: async (email: string, verificationCode: string, newPassword: string) => {
-    try {
-      Logger.debug('AppStore', 'Resetting password', { email });
-      await resetPasswordApi(email, verificationCode, newPassword);
-      Logger.info('AppStore', 'Password reset successfully');
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Password reset failed';
-      Logger.error('AppStore', 'Password reset failed', { error: errorMessage });
-      throw error;
-    }
-  },
-
-  sendVerificationCode: async (email: string) => {
-    try {
-      const normalizedEmail = email.toLowerCase().trim();
-      Logger.debug('AppStore', 'Sending verification code', { email: normalizedEmail });
-      await sendVerificationCodeApi(normalizedEmail);
-      Logger.info('AppStore', 'Verification code sent', { email: normalizedEmail });
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Failed to send verification code';
-      Logger.error('AppStore', 'Send verification code failed', { error: errorMessage });
-      throw error;
-    }
-  },
-
-  verifyEmailAndRegister: async (email: string, password: string, verificationCode: string) => {
-    try {
-      const normalizedEmail = email.toLowerCase().trim();
-      Logger.debug('AppStore', 'Verifying email and registering', { email: normalizedEmail });
-      const response = await verifyEmailAndRegisterApi(normalizedEmail, password, verificationCode);
-      await setStoredAuthToken(response.token);
-
-      Logger.info('AppStore', 'Registration verified successfully');
       set({
-        authToken: response.token,
-        authStatus: 'authenticated',
-        userProfile: {
-          displayName: response.user.displayName,
-          email: response.user.email,
-          avatarUrl: response.user.avatarUrl || '',
-          membershipLabel: response.user.membershipLabel || '',
-        },
+        authToken: null,
+        authStatus: 'unauthenticated',
+        userProfile: EMPTY_USER_PROFILE,
+        plaidLinkToken: null,
+        plaidLinkTokenTimestamp: null,
         authError: null,
-        preferences: {
-          baseCurrency: 'USD',
-          language: 'en',
-          weeklyAiSummary: false,
-        },
-        aiInsights: [],
       });
+    },
 
-      // Auto-load Plaid data from backend
-      try {
-        Logger.debug('AppStore', 'Auto-loading Plaid finance data after registration');
-        const hydratePlaidFinanceData = useFinanceStore.getState().hydratePlaidFinanceData;
-        await hydratePlaidFinanceData(response.token);
-        Logger.info('AppStore', 'Plaid finance data auto-loaded after registration');
-        
-        // Record asset snapshot for performance tracking
-        const recordAssetSnapshot = useFinanceStore.getState().recordAssetSnapshot;
-        recordAssetSnapshot();
-      } catch (plaidError) {
-        // Plaid data loading is optional - don't fail the registration if it fails
-        Logger.warn('AppStore', 'Failed to auto-load Plaid data after registration', plaidError);
-      }
+    // ─────────────────────────────────────────────────────────────────
+    // Registration
+    // ─────────────────────────────────────────────────────────────────
 
-      // Load exchange rates
-      try {
-        await get().loadExchangeRates();
-      } catch (rateError) {
-        Logger.warn('AppStore', 'Failed to load exchange rates after registration', rateError);
-      }
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Registration verification failed';
-      Logger.error('AppStore', 'Registration verification failed', { error: errorMessage });
-      throw error;
-    }
-  },
-
-  resendVerificationCode: async (email: string) => {
-    try {
+    sendVerificationCode: async (email) => {
       const normalizedEmail = email.toLowerCase().trim();
-      Logger.debug('AppStore', 'Resending verification code', { email: normalizedEmail });
-      await resendVerificationCodeApi(normalizedEmail);
-      Logger.info('AppStore', 'Verification code resent', { email: normalizedEmail });
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Failed to resend verification code';
-      Logger.error('AppStore', 'Resend verification code failed', { error: errorMessage });
-      throw error;
-    }
-  },
+      await requestRegistrationCode(normalizedEmail);
+      Logger.info('AppStore', 'Verification code sent', { email: normalizedEmail });
+    },
 
-  hydrateFromStorage: async () => {
-    try {
+    verifyEmailAndRegister: async (email, password, verificationCode, referralCode) => {
+      const normalizedEmail = email.toLowerCase().trim();
+      Logger.info('AppStore', 'SRP register starting', { email: normalizedEmail });
+      set({ authStatus: 'loading', authError: null });
+
+      try {
+        const result = await srpRegister({
+          email: normalizedEmail,
+          password,
+          verificationCode,
+          referralCode,
+        });
+
+        await secureAuthTokenStore.set(result.token);
+        set({ authToken: result.token });
+
+        try {
+          await bootstrapSessionAfterRegistration({
+            derivedKeys: result.derivedKeys,
+            keyPair: result.keyPair,
+            encryptedPrivateKey: result.encryptedPrivateKey,
+          });
+        } catch (error) {
+          result.derivedKeys.dekWrapKey.fill(0);
+          result.derivedKeys.localCacheKey.fill(0);
+          throw error;
+        }
+
+        set({
+          authStatus: 'authenticated',
+          userProfile: toLocalProfile(result.user),
+          authError: null,
+          preferences: DEFAULT_PREFERENCES,
+          aiInsights: [],
+        });
+
+        Logger.info('AppStore', 'SRP register successful');
+        void get().loadExchangeRates();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Registration failed';
+        Logger.warn('AppStore', 'SRP register failed', { message });
+        await secureAuthTokenStore.clear().catch(() => undefined);
+        clearCryptoSession();
+        set({ authStatus: 'unauthenticated', authToken: null, authError: message });
+        throw error;
+      }
+    },
+
+    // ─────────────────────────────────────────────────────────────────
+    // Password reset (forgot-password flow)
+    // ─────────────────────────────────────────────────────────────────
+
+    requestPasswordReset: async (email) => {
+      await requestPasswordResetApi(email);
+      Logger.info('AppStore', 'Password reset code sent');
+    },
+
+    resetPassword: async (email, verificationCode, newPassword) => {
+      await zkResetPassword({
+        email,
+        resetCode: verificationCode,
+        newPassword,
+      });
+      Logger.info('AppStore', 'Password reset completed (keypair will rebuild on next login)');
+    },
+
+    // ─────────────────────────────────────────────────────────────────
+    // Bootstrap
+    // ─────────────────────────────────────────────────────────────────
+
+    hydrateFromStorage: async () => {
       Logger.debug('AppStore', 'Hydrating from storage');
       set({ authStatus: 'loading' });
 
-      const storedToken = await getStoredAuthToken();
-      if (!storedToken) {
-        Logger.info('AppStore', 'No stored token found');
-        set({ authStatus: 'unauthenticated', authError: null });
-        return;
-      }
+      await migrateLegacyTokenToSecureStore();
 
-      // Fetch profile with 10-second timeout
-      Logger.debug('AppStore', 'Found stored token, fetching profile');
-      const profilePromise = fetchCurrentUserProfile(storedToken);
-      const profileTimeout = new Promise<{ user: import('../api/authApi').BackendUserProfile }>((_, reject) =>
-        setTimeout(() => reject(new Error('Profile fetch timeout')), 10000)
-      );
-      const response = await Promise.race([profilePromise, profileTimeout]);
-
-      Logger.info('AppStore', 'Profile fetched successfully');
-      set({
-        authToken: storedToken,
-        authStatus: 'authenticated',
-        userProfile: {
-          displayName: response.user.displayName,
-          email: response.user.email,
-          avatarUrl: response.user.avatarUrl || '',
-          membershipLabel: response.user.membershipLabel || '',
-        },
-        authError: null,
-        preferences: {
-          baseCurrency: 'USD',
-          language: 'en',
-          weeklyAiSummary: false,
-        },
-        aiInsights: [],
-      });
-
-      // Note: Plaid data is now managed by Webhook model
-      // Frontend will pull data when user opens Investment/Dashboard screens
-      // Removed auto-load on App startup to avoid redundant API calls
-
-      // Load exchange rates with 5-second timeout (optional)
-      try {
-        Logger.debug('AppStore', 'Loading exchange rates');
-        const ratesPromise = get().loadExchangeRates();
-        const ratesTimeout = new Promise<void>((_, reject) =>
-          setTimeout(() => reject(new Error('Exchange rates timeout')), 5000)
-        );
-        await Promise.race([ratesPromise, ratesTimeout]);
-      } catch (rateError) {
-        Logger.warn('AppStore', 'Failed to load exchange rates during hydration', rateError);
-      }
-
-      // Hydrate connected exchange accounts with 5-second timeout (optional)
-      try {
-        Logger.debug('AppStore', 'Hydrating exchange accounts');
-        const hydrateExchangeAccounts = useFinanceStore.getState().hydrateExchangeAccounts;
-        const exchangePromise = hydrateExchangeAccounts(storedToken);
-        const exchangeTimeout = new Promise<void>((_, reject) =>
-          setTimeout(() => reject(new Error('Exchange accounts hydration timeout')), 5000)
-        );
-        await Promise.race([exchangePromise, exchangeTimeout]);
-        Logger.info('AppStore', 'Exchange accounts hydrated successfully');
-      } catch (exchangeError) {
-        Logger.warn('AppStore', 'Failed to hydrate exchange accounts', exchangeError);
-      }
-    } catch (error) {
-      Logger.warn('AppStore', 'Failed to hydrate from storage', error);
-      await clearStoredAuthToken();
-      set({ authStatus: 'unauthenticated', authToken: null });
-    }
-  },
-  setDisplayName: async (displayName) => {
-    try {
-      const authToken = get().authToken;
-      if (!authToken) {
-        throw new Error('Not authenticated');
-      }
-
-      Logger.debug('AppStore', 'Updating display name', { displayName });
-      const response = await updateDisplayNameApi(authToken, displayName);
-      
-      if (!response || !response.user || !response.user.displayName) {
-        Logger.warn('AppStore', 'Display name API response missing expected structure', { response });
-        throw new Error('Invalid response from display name update endpoint');
-      }
-
-      Logger.info('AppStore', 'Display name updated successfully', { displayName: response.user.displayName });
-      
-      set((state) => ({
-        userProfile: {
-          ...state.userProfile,
-          displayName: response.user.displayName,
-        },
-      }));
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Failed to update display name';
-      Logger.error('AppStore', 'Failed to update display name', { error: errorMessage });
-      throw error;
-    }
-  },
-  requestEmailChange: async (newEmail: string) => {
-    try {
-      const authToken = get().authToken;
-      if (!authToken) {
-        throw new Error('Not authenticated');
-      }
-
-      Logger.debug('AppStore', 'Requesting email change', { newEmail });
-      const response = await requestEmailChange(authToken, newEmail);
-      Logger.info('AppStore', 'Email change requested, verification code sent', { expiresIn: response?.expiresIn });
-      return response;
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Failed to request email change';
-      Logger.error('AppStore', 'Email change request failed', { error: errorMessage });
-      throw error;
-    }
-  },
-
-  confirmEmailChange: async (verificationCode: string) => {
-    try {
-      const authToken = get().authToken;
-      if (!authToken) {
-        throw new Error('Not authenticated');
-      }
-
-      Logger.debug('AppStore', 'Confirming email change');
-      const response = await confirmEmailChange(authToken, verificationCode);
-      
-      if (!response || !response.user || !response.user.email) {
-        Logger.warn('AppStore', 'Email change API response missing expected structure', { response });
-        throw new Error('Invalid response from email change confirmation endpoint');
-      }
-
-      Logger.info('AppStore', 'Email changed successfully', { newEmail: response.user.email });
-      
-      set((state) => ({
-        userProfile: {
-          ...state.userProfile,
-          email: response.user.email,
-        },
-      }));
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Failed to confirm email change';
-      Logger.error('AppStore', 'Email change confirmation failed', { error: errorMessage });
-      throw error;
-    }
-  },
-  updateAvatar: async (avatarUrl) => {
-    try {
-      const authToken = get().authToken;
-      Logger.info('AppStore.updateAvatar', 'Starting update process', {
-        hasAuthToken: !!authToken,
-        avatarUrlLength: avatarUrl?.length || 0,
-        avatarUrlPrefix: avatarUrl?.substring(0, 80) || 'N/A'
-      });
-
-      if (!authToken) {
-        throw new Error('Not authenticated');
-      }
-
-      Logger.debug('AppStore.updateAvatar', 'Calling updateAvatarApi', { avatarLength: avatarUrl.length });
-      const response = await updateAvatarApi(authToken, avatarUrl);
-      
-      Logger.info('AppStore.updateAvatar', 'API response received', {
-        hasResponse: !!response,
-        hasUser: !!response?.user,
-        hasAvatarUrl: !!response?.user?.avatarUrl,
-        newAvatarLength: response?.user?.avatarUrl?.length || 0,
-        newAvatarPrefix: response?.user?.avatarUrl?.substring(0, 80) || 'N/A'
-      });
-
-      if (!response || !response.user || !response.user.avatarUrl) {
-        Logger.error('AppStore.updateAvatar', 'Avatar API response missing structure', { 
-          response,
-          hasUser: !!response?.user,
-          hasAvatarUrl: !!response?.user?.avatarUrl
-        });
-        throw new Error('Invalid response from avatar upload endpoint');
-      }
-
-      Logger.info('AppStore.updateAvatar', 'Updating local state');
-      set((state) => ({
-        userProfile: {
-          ...state.userProfile,
-          avatarUrl: response.user.avatarUrl,
-        },
-      }));
-
-      Logger.info('AppStore.updateAvatar', 'Avatar update completed successfully', {
-        newAvatarUrl: response.user.avatarUrl.substring(0, 80)
-      });
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Failed to update avatar';
-      Logger.error('AppStore.updateAvatar', 'Avatar update failed', { 
-        error: errorMessage,
-        errorType: error instanceof Error ? error.constructor.name : typeof error,
-        fullError: error
-      });
-      throw error;
-    }
-  },
-  setBaseCurrency: (baseCurrency) => set((state) => ({ preferences: { ...state.preferences, baseCurrency } })),
-  setLanguage: (language) => set((state) => ({ preferences: { ...state.preferences, language } })),
-  toggleWeeklyAiSummary: () =>
-    set((state) => ({
-      preferences: {
-        ...state.preferences,
-        weeklyAiSummary: !state.preferences.weeklyAiSummary,
-      },
-    })),
-  addChatMessage: (message) => set((state) => ({ chatMessages: [...state.chatMessages, message] })),
-  setPlaidLinkToken: (plaidLinkToken) => set({ plaidLinkToken }),
-  setAuthToken: (authToken) => {
-    if (authToken) {
-      set({ authToken, authStatus: 'authenticated' });
-      return;
-    }
-
-    set({ authToken: null, authStatus: 'unauthenticated' });
-  },
-  clearAuthSession: () => {
-    set(() => ({
-      authToken: null,
-      authStatus: 'unauthenticated',
-      plaidLinkToken: null,
-      userProfile: {
-        displayName: '',
-        email: '',
-        avatarUrl: '',
-        membershipLabel: '',
-      },
-      authError: null,
-    }));
-  },
-  hydrateUserProfile: async () => {
-    const authToken = get().authToken;
-
-    if (!authToken) {
-      set({ authStatus: 'unauthenticated' });
-      return;
-    }
-
-    try {
-      const response = await fetchCurrentUserProfile(authToken);
-      set({
-        userProfile: {
-          displayName: response.user.displayName,
-          email: response.user.email,
-          avatarUrl: response.user.avatarUrl || '',
-          membershipLabel: response.user.membershipLabel || '',
-        },
-        authStatus: 'authenticated',
-      });
-    } catch (error) {
-      Logger.error('AppStore', 'Failed to hydrate user profile', error);
-      set({ authStatus: 'unauthenticated' });
-    }
-  },
-
-  loadExchangeRates: async () => {
-    try {
-      const state = get();
-      
-      // Skip if already loading
-      if (state.isLoadingExchangeRates) {
-        return;
-      }
-
-      // Skip if cached rates are still valid
-      if (state.exchangeRates && isCacheValid(state.exchangeRates.lastUpdated)) {
-        Logger.debug('AppStore', 'Using cached exchange rates');
-        return;
-      }
-
-      Logger.debug('AppStore', 'Loading exchange rates');
-      set({ isLoadingExchangeRates: true });
-
-      const rates = await fetchExchangeRates();
-      set({ exchangeRates: rates, isLoadingExchangeRates: false });
-
-      Logger.info('AppStore', 'Exchange rates loaded successfully', {
-        USD: rates.USD,
-        EUR: rates.EUR,
-        TWD: rates.TWD,
-      });
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Failed to load exchange rates';
-      Logger.error('AppStore', 'Failed to load exchange rates', { error: errorMessage });
-      set({ isLoadingExchangeRates: false });
-    }
-  },
-
-  requestPlaidLinkToken: async () => {
-    try {
-      const authToken = get().authToken;
-      if (!authToken) {
-        Logger.warn('AppStore', 'Cannot request Plaid link token: not authenticated');
-        return null;
-      }
-
-      Logger.debug('AppStore', 'Requesting Plaid link token');
-      const result = await createPlaidLinkToken(authToken);
-      Logger.debug('AppStore', 'Plaid API response received', { result });
-      
-      // Handle both { link_token } and { token } response formats
-      const token = result.link_token || (result as any).token;
+      const token = await secureAuthTokenStore.get();
       if (!token) {
-        Logger.error('AppStore', 'No link token in response', { result });
+        set({ authStatus: 'unauthenticated', authToken: null, authError: null });
+        return;
+      }
+
+      set({ authToken: token });
+
+      try {
+        const profilePromise = fetchCurrentUserProfile();
+        const timeoutPromise = new Promise<UserProfileV1>((_, reject) =>
+          setTimeout(() => reject(new Error('Profile fetch timeout')), 10000),
+        );
+        const profile = await Promise.race([profilePromise, timeoutPromise]);
+
+        set({
+          authStatus: 'authenticated',
+          userProfile: toLocalProfile(profile),
+          authError: null,
+          preferences: DEFAULT_PREFERENCES,
+          aiInsights: [],
+        });
+
+        Logger.info('AppStore', 'Hydrated authenticated session', {
+          email: profile.email,
+          hasKeypairBootstrap: false,
+        });
+
+        void get().loadExchangeRates();
+        try {
+          await useFinanceStore.getState().hydrateExchangeAccounts(token);
+        } catch (error) {
+          Logger.warn('AppStore', 'Exchange accounts hydration failed', { error: String(error) });
+        }
+      } catch (error) {
+        Logger.warn('AppStore', 'Failed to hydrate from storage; clearing token', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        await secureAuthTokenStore.clear();
+        set({ authStatus: 'unauthenticated', authToken: null, authError: null });
+      }
+    },
+
+    hydrateUserProfile: async () => {
+      if (!get().authToken) {
+        set({ authStatus: 'unauthenticated' });
+        return;
+      }
+      try {
+        const profile = await fetchCurrentUserProfile();
+        set({
+          authStatus: 'authenticated',
+          userProfile: toLocalProfile(profile),
+        });
+      } catch (error) {
+        Logger.warn('AppStore', 'hydrateUserProfile failed', { error: String(error) });
+        set({ authStatus: 'unauthenticated' });
+      }
+    },
+
+    // ─────────────────────────────────────────────────────────────────
+    // Profile mutations
+    // ─────────────────────────────────────────────────────────────────
+
+    setDisplayName: async (displayName) => {
+      const profile = await updateDisplayNameApi(displayName);
+      set((state) => ({
+        userProfile: { ...state.userProfile, displayName: profile.displayName },
+      }));
+    },
+
+    setReferralCode: async (referralCode) => {
+      const profile = await setReferralCodeApi(referralCode);
+      set({ userProfile: toLocalProfile(profile) });
+    },
+
+    requestEmailChange: async (newEmail) => {
+      return requestEmailChangeApi(newEmail);
+    },
+
+    confirmEmailChange: async (newEmail, verificationCode) => {
+      const profile = await confirmEmailChangeApi(newEmail, verificationCode);
+      set((state) => ({
+        userProfile: { ...state.userProfile, email: profile.email },
+      }));
+    },
+
+    updateAvatar: async (avatarUrl) => {
+      const profile = await updateAvatarApi(avatarUrl);
+      set((state) => ({
+        userProfile: { ...state.userProfile, avatarUrl: profile.avatarUrl },
+      }));
+    },
+
+    // ─────────────────────────────────────────────────────────────────
+    // Preferences
+    // ─────────────────────────────────────────────────────────────────
+
+    setBaseCurrency: (baseCurrency) =>
+      set((state) => ({ preferences: { ...state.preferences, baseCurrency } })),
+
+    setLanguage: (language) =>
+      set((state) => ({ preferences: { ...state.preferences, language } })),
+
+    toggleWeeklyAiSummary: () =>
+      set((state) => ({
+        preferences: {
+          ...state.preferences,
+          weeklyAiSummary: !state.preferences.weeklyAiSummary,
+        },
+      })),
+
+    addChatMessage: (message) =>
+      set((state) => ({ chatMessages: [...state.chatMessages, message] })),
+
+    // ─────────────────────────────────────────────────────────────────
+    // Plaid (untouched until PR-B switches to encrypted endpoints)
+    // ─────────────────────────────────────────────────────────────────
+
+    setPlaidLinkToken: (plaidLinkToken) => set({ plaidLinkToken }),
+
+    setAuthToken: (token) => {
+      if (token) {
+        set({ authToken: token, authStatus: 'authenticated' });
+      } else {
+        set({ authToken: null, authStatus: 'unauthenticated' });
+      }
+    },
+
+    clearAuthSession: () => {
+      clearCryptoSession();
+      set({
+        authToken: null,
+        authStatus: 'unauthenticated',
+        plaidLinkToken: null,
+        userProfile: EMPTY_USER_PROFILE,
+        authError: null,
+      });
+    },
+
+    requestPlaidLinkToken: async () => {
+      if (!get().authToken) return null;
+      const result = await createPlaidLinkToken();
+      const linkToken = result.link_token;
+      if (!linkToken) {
         throw new Error('No link token returned from backend');
       }
-      
-      // 保存 token 和生成时间戳（用于检测过期）
       const now = Date.now();
-      set({ plaidLinkToken: token, plaidLinkTokenTimestamp: now });
-      Logger.info('AppStore', 'Plaid link token received', { token: token.substring(0, 20) + '...', timestamp: new Date(now).toISOString() });
-      return token;
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Failed to get Plaid link token';
-      Logger.error('AppStore', 'Failed to request Plaid link token', { error: errorMessage });
-      throw error;
-    }
-  },
+      set({ plaidLinkToken: linkToken, plaidLinkTokenTimestamp: now });
+      return linkToken;
+    },
 
-  confirmPlaidExchange: async (publicToken: string, institutionName?: string) => {
-    try {
-      const authToken = get().authToken;
-      if (!authToken) {
-        throw new Error('Not authenticated');
-      }
-
-      Logger.debug('AppStore', 'Exchanging Plaid public token', {
-        institution: institutionName,
-      });
-
-      const result = await exchangePlaidPublicToken(authToken, {
+    confirmPlaidExchange: async (publicToken, institutionName) => {
+      const token = get().authToken;
+      if (!token) throw new Error('Not authenticated');
+      await exchangePlaidPublicToken({
         public_token: publicToken,
         institution_name: institutionName,
       });
-
-      Logger.info('AppStore', 'Plaid token exchanged successfully', { result });
-
-      // Wait for webhook to complete after connect
       await waitForWebhookCompletion('connect');
-
-      // Load the updated finance data
-      const hydratePlaidFinanceData = useFinanceStore.getState().hydratePlaidFinanceData;
-      await hydratePlaidFinanceData(authToken);
-
-      // Record asset snapshot for performance tracking
-      const recordAssetSnapshot = useFinanceStore.getState().recordAssetSnapshot;
-      recordAssetSnapshot();
-
-      // Clear the link token and timestamp
+      await useFinanceStore.getState().hydratePlaidFinanceData(token);
+      // Backend records the snapshot during sync; we just pull the new rows.
+      void useFinanceStore.getState().hydrateAssetHistory();
       set({ plaidLinkToken: null, plaidLinkTokenTimestamp: null });
-      Logger.info('AppStore', 'Finance data reloaded and asset snapshot recorded after Plaid exchange');
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Failed to exchange Plaid token';
-      Logger.error('AppStore', 'Plaid exchange failed', { error: errorMessage });
-      throw error;
-    }
-  },
+    },
 
-  disconnectPlaidAccount: async (accountId: string) => {
-    try {
-      const authToken = get().authToken;
-      if (!authToken) {
-        throw new Error('Not authenticated');
-      }
-
-      Logger.debug('AppStore', 'Disconnecting Plaid account', { accountId });
-
-      const result = await disconnectPlaidAccountApi(authToken, accountId);
-      Logger.info('AppStore', 'Plaid account disconnected successfully', { result });
-
-      // Update local state to remove the account
-      const disconnectBankingAccount = useFinanceStore.getState().disconnectBankingAccount;
-      await disconnectBankingAccount(accountId);
-
-      // Wait for webhook to complete after disconnect
+    disconnectPlaidAccount: async (accountId) => {
+      const token = get().authToken;
+      if (!token) throw new Error('Not authenticated');
+      await disconnectPlaidItem(accountId);
+      await useFinanceStore.getState().disconnectBankingAccount(accountId);
       await waitForWebhookCompletion('disconnect');
+      await useFinanceStore.getState().hydratePlaidFinanceData(token);
+    },
 
-      // Reload the updated finance data
-      const hydratePlaidFinanceData = useFinanceStore.getState().hydratePlaidFinanceData;
-      await hydratePlaidFinanceData(authToken);
+    disconnectExchangeAccount: async (exchangeAccountId) => {
+      if (!get().authToken) throw new Error('Not authenticated');
+      await disconnectExchangeAccountApi(exchangeAccountId);
 
-      Logger.info('AppStore', 'Finance data reloaded after Plaid account disconnect');
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Failed to disconnect Plaid account';
-      Logger.error('AppStore', 'Failed to disconnect Plaid account', { error: errorMessage });
-      throw error;
-    }
-  },
-
-  disconnectExchangeAccount: async (exchangeAccountId: string) => {
-    try {
-      const authToken = get().authToken;
-      if (!authToken) {
-        throw new Error('Not authenticated');
-      }
-
-      Logger.debug('AppStore', 'Disconnecting exchange account', { exchangeAccountId });
-
-      await disconnectExchangeAccountApi(exchangeAccountId, authToken);
-      Logger.info('AppStore', 'Exchange account disconnected successfully', { exchangeAccountId });
-
-      // Update store to remove the exchange account
       const { useExchangeStore } = await import('./useExchangeStore');
-      const removeExchangeAccount = useExchangeStore.getState().removeExchangeAccount;
-      removeExchangeAccount(exchangeAccountId);
+      useExchangeStore.getState().removeExchangeAccount(exchangeAccountId);
 
-      // Also remove from finance store's exchangeAccounts list
       const { exchangeAccounts } = useFinanceStore.getState();
       useFinanceStore.setState({
         exchangeAccounts: exchangeAccounts.filter((acc) => acc.id !== exchangeAccountId),
       });
 
-      // Record asset snapshot for tracking changes
-      const recordAssetSnapshot = useFinanceStore.getState().recordAssetSnapshot;
-      recordAssetSnapshot();
+      void useFinanceStore.getState().hydrateAssetHistory();
+    },
 
-      Logger.info('AppStore', 'Exchange account removed from stores');
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Failed to disconnect exchange account';
-      Logger.error('AppStore', 'Failed to disconnect exchange account', { error: errorMessage });
-      throw error;
-    }
-  },
-}));
+    loadExchangeRates: async () => {
+      const state = get();
+      if (state.isLoadingExchangeRates) return;
+      if (state.exchangeRates && isCacheValid(state.exchangeRates.lastUpdated)) return;
+      set({ isLoadingExchangeRates: true });
+      try {
+        const rates = await fetchExchangeRates();
+        set({ exchangeRates: rates, isLoadingExchangeRates: false });
+      } catch (error) {
+        Logger.warn('AppStore', 'Failed to load exchange rates', { error: String(error) });
+        set({ isLoadingExchangeRates: false });
+      }
+    },
+  };
+});

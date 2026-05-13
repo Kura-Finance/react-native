@@ -16,17 +16,19 @@ import { useAppStore } from '../../../shared/store/useAppStore';
 import Logger from '../../../shared/utils/Logger';
 
 interface ResetPasswordWithTokenScreenProps {
-  initialToken?: string;
+  email: string;
+  initialCode?: string;
   onNavigateToLogin?: () => void;
   onBack?: () => void;
 }
 
 export default function ResetPasswordWithTokenScreen({
-  initialToken = '',
+  email,
+  initialCode = '',
   onNavigateToLogin,
   onBack,
 }: ResetPasswordWithTokenScreenProps) {
-  const [resetToken, setResetToken] = useState(initialToken);
+  const [resetCode, setResetCode] = useState(initialCode);
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -36,22 +38,18 @@ export default function ResetPasswordWithTokenScreen({
 
   const handleResetPassword = async () => {
     try {
-      // Validate form
-      if (!resetToken.trim()) {
-        setError('Reset token is required');
+      if (!email.trim()) {
+        setError('Email is required');
         return;
       }
-
-      if (!newPassword.trim()) {
-        setError('New password is required');
+      if (!/^\d{6}$/.test(resetCode.trim())) {
+        setError('Verification code must be 6 digits');
         return;
       }
-
-      if (newPassword.length < 6) {
-        setError('Password must be at least 6 characters');
+      if (newPassword.length < 8) {
+        setError('Password must be at least 8 characters');
         return;
       }
-
       if (newPassword !== confirmPassword) {
         setError('Passwords do not match');
         return;
@@ -60,21 +58,17 @@ export default function ResetPasswordWithTokenScreen({
       setIsLoading(true);
       setError(null);
 
-      Logger.debug('ResetPasswordWithTokenScreen', 'Resetting password with token');
-      await resetPassword(resetToken, newPassword);
+      Logger.debug('ResetPasswordWithTokenScreen', 'Resetting password (SRP)', { email });
+      await resetPassword(email, resetCode.trim(), newPassword);
 
       Logger.info('ResetPasswordWithTokenScreen', 'Password reset successfully');
-      Alert.alert('Success', 'Your password has been reset successfully. Please sign in.', [
-        {
-          text: 'OK',
-          onPress: onNavigateToLogin,
-        },
+      Alert.alert('Success', 'Your password has been reset. Please sign in.', [
+        { text: 'OK', onPress: onNavigateToLogin },
       ]);
     } catch (err) {
-      const errorMessage =
-        err instanceof Error ? err.message : 'Failed to reset password. Please try again.';
-      setError(errorMessage);
-      Logger.error('ResetPasswordWithTokenScreen', 'Password reset failed', { error: errorMessage });
+      const message = err instanceof Error ? err.message : 'Failed to reset password. Please try again.';
+      setError(message);
+      Logger.warn('ResetPasswordWithTokenScreen', 'Password reset failed', { message });
     } finally {
       setIsLoading(false);
     }
@@ -83,13 +77,8 @@ export default function ResetPasswordWithTokenScreen({
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: '#0B0B0F' }}>
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
-        <ScrollView
-          contentContainerStyle={{ flexGrow: 1 }}
-          showsVerticalScrollIndicator={false}
-          scrollEnabled={false}
-        >
+        <ScrollView contentContainerStyle={{ flexGrow: 1 }} showsVerticalScrollIndicator={false}>
           <View style={{ flex: 1, paddingHorizontal: 24, justifyContent: 'center' }}>
-            {/* Header */}
             <View style={{ marginBottom: 40, alignItems: 'center' }}>
               <TouchableOpacity
                 onPress={onBack}
@@ -111,11 +100,10 @@ export default function ResetPasswordWithTokenScreen({
                 Reset Password
               </Text>
               <Text style={{ fontSize: 14, color: '#999999', textAlign: 'center' }}>
-                Enter your reset token and new password
+                Enter the 6-digit code we sent to {email}
               </Text>
             </View>
 
-            {/* Error Message */}
             {error && (
               <View
                 style={{
@@ -132,10 +120,9 @@ export default function ResetPasswordWithTokenScreen({
               </View>
             )}
 
-            {/* Reset Token Input */}
             <View style={{ marginBottom: 20 }}>
               <Text style={{ fontSize: 12, color: '#CCCCCC', fontWeight: '600', marginBottom: 8 }}>
-                Reset Token
+                Verification Code
               </Text>
               <View
                 style={{
@@ -144,33 +131,25 @@ export default function ResetPasswordWithTokenScreen({
                   borderRadius: 12,
                   paddingHorizontal: 16,
                   paddingVertical: 12,
-                  backgroundColor: resetToken ? 'rgba(34, 197, 94, 0.1)' : '#1A1A24',
+                  backgroundColor: '#1A1A24',
                   flexDirection: 'row',
                   alignItems: 'center',
                 }}
               >
-                <Ionicons
-                  name={resetToken ? 'checkmark-done-outline' : 'key-outline'}
-                  size={18}
-                  color={resetToken ? '#22C55E' : '#9CA3AF'}
-                  style={{ marginRight: 8 }}
-                />
+                <Ionicons name="key-outline" size={18} color="#9CA3AF" style={{ marginRight: 8 }} />
                 <TextInput
-                  placeholder={resetToken ? 'Token auto-filled from email' : 'Paste your reset token'}
-                  placeholderTextColor={resetToken ? '#22C55E' : '#666666'}
-                  value={resetToken}
-                  onChangeText={setResetToken}
+                  placeholder="6-digit code"
+                  placeholderTextColor="#666666"
+                  value={resetCode}
+                  onChangeText={setResetCode}
+                  keyboardType="number-pad"
+                  maxLength={6}
                   editable={!isLoading}
-                  style={{
-                    flex: 1,
-                    color: '#FFFFFF',
-                    fontSize: 14,
-                  }}
+                  style={{ flex: 1, color: '#FFFFFF', fontSize: 14 }}
                 />
               </View>
             </View>
 
-            {/* New Password Input */}
             <View style={{ marginBottom: 20 }}>
               <Text style={{ fontSize: 12, color: '#CCCCCC', fontWeight: '600', marginBottom: 8 }}>
                 New Password
@@ -189,22 +168,17 @@ export default function ResetPasswordWithTokenScreen({
               >
                 <Ionicons name="lock-closed-outline" size={18} color="#9CA3AF" style={{ marginRight: 8 }} />
                 <TextInput
-                  placeholder="Enter new password"
+                  placeholder="Enter new password (8+ chars)"
                   placeholderTextColor="#666666"
                   value={newPassword}
                   onChangeText={setNewPassword}
-                  secureTextEntry={true}
+                  secureTextEntry
                   editable={!isLoading}
-                  style={{
-                    flex: 1,
-                    color: '#FFFFFF',
-                    fontSize: 14,
-                  }}
+                  style={{ flex: 1, color: '#FFFFFF', fontSize: 14 }}
                 />
               </View>
             </View>
 
-            {/* Confirm Password Input */}
             <View style={{ marginBottom: 24 }}>
               <Text style={{ fontSize: 12, color: '#CCCCCC', fontWeight: '600', marginBottom: 8 }}>
                 Confirm Password
@@ -227,18 +201,13 @@ export default function ResetPasswordWithTokenScreen({
                   placeholderTextColor="#666666"
                   value={confirmPassword}
                   onChangeText={setConfirmPassword}
-                  secureTextEntry={true}
+                  secureTextEntry
                   editable={!isLoading}
-                  style={{
-                    flex: 1,
-                    color: '#FFFFFF',
-                    fontSize: 14,
-                  }}
+                  style={{ flex: 1, color: '#FFFFFF', fontSize: 14 }}
                 />
               </View>
             </View>
 
-            {/* Submit Button */}
             <TouchableOpacity
               onPress={handleResetPassword}
               disabled={isLoading}
@@ -255,16 +224,13 @@ export default function ResetPasswordWithTokenScreen({
               {isLoading ? (
                 <ActivityIndicator color="#FFFFFF" size="small" />
               ) : (
-                <Text style={{ fontSize: 16, fontWeight: '600', color: '#FFFFFF' }}>
-                  Reset Password
-                </Text>
+                <Text style={{ fontSize: 16, fontWeight: '600', color: '#FFFFFF' }}>Reset Password</Text>
               )}
             </TouchableOpacity>
 
-            {/* Back Link */}
             <TouchableOpacity onPress={onBack} disabled={isLoading}>
               <Text style={{ fontSize: 14, color: '#8B5CF6', fontWeight: '600', textAlign: 'center' }}>
-                Back to Email Reset
+                Back
               </Text>
             </TouchableOpacity>
           </View>

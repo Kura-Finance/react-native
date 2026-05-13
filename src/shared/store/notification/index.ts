@@ -1,152 +1,148 @@
+/**
+ * Notification store — async-aware.
+ *
+ * Wraps `src/lib/api/notification/client.ts` so screens never call the API
+ * directly; the store is the single owner of the notification list + cached
+ * preferences + unread count derivation.
+ */
+
 import { create } from 'zustand';
-import { Notification, NotificationSettings, NotificationState } from './types';
+import {
+  clearAllNotifications as clearAllApi,
+  deleteNotification as deleteApi,
+  fetchNotificationPreferences,
+  fetchNotifications,
+  isUnread,
+  markNotificationAsRead as markReadApi,
+  markNotificationsBatchAsRead as markBatchReadApi,
+  updateNotificationPreferences,
+  type FetchNotificationsParams,
+} from '../../../lib/api/notification';
 import Logger from '../../utils/Logger';
+import type {
+  Notification,
+  NotificationPreferences,
+  NotificationState,
+} from './types';
+
+function countUnread(notifications: Notification[]): number {
+  return notifications.reduce((sum, n) => (isUnread(n) ? sum + 1 : sum), 0);
+}
 
 interface NotificationStore extends NotificationState {
-  // Actions
-  addNotification: (notification: Notification) => void;
-  removeNotification: (id: string) => void;
-  markAsRead: (id: string) => void;
-  markAllAsRead: () => void;
-  clearNotifications: () => void;
-  setNotifications: (notifications: Notification[]) => void;
-  updateSettings: (settings: Partial<NotificationSettings>) => void;
+  loadNotifications: (params?: FetchNotificationsParams) => Promise<void>;
+  loadPreferences: () => Promise<void>;
+  updatePreferences: (patch: Partial<NotificationPreferences>) => Promise<void>;
+  markAsRead: (id: string) => Promise<void>;
+  markBatchAsRead: (ids: string[]) => Promise<void>;
+  removeNotification: (id: string) => Promise<void>;
+  clearAll: () => Promise<void>;
   setLoading: (loading: boolean) => void;
   setError: (error: string | null) => void;
 }
 
-const defaultSettings: NotificationSettings = {
-  enableTransactionAlerts: true,
-  enableAccountChanges: true,
-  enableSystemMessages: true,
-  enablePriceAlerts: true,
-  enablePushNotifications: true,
-};
-
 export const useNotificationStore = create<NotificationStore>((set, get) => ({
-  // Initial State
   notifications: [],
-  settings: defaultSettings,
+  preferences: null,
   isLoading: false,
   error: null,
   unreadCount: 0,
   lastFetchedAt: null,
 
-  // Actions
-  addNotification: (notification: Notification) => {
-    Logger.info('NotificationStore', 'Adding notification', {
-      id: notification.id,
-      type: notification.type,
-      title: notification.title,
-    });
-
-    set((state) => {
-      const updatedNotifications = [notification, ...state.notifications];
-      const unreadCount = updatedNotifications.filter(
-        (n) => n.status === 'unread'
-      ).length;
-
-      return {
-        notifications: updatedNotifications,
-        unreadCount,
-      };
-    });
-  },
-
-  removeNotification: (id: string) => {
-    Logger.debug('NotificationStore', 'Removing notification', { id });
-
-    set((state) => {
-      const updatedNotifications = state.notifications.filter(
-        (n) => n.id !== id
-      );
-      const unreadCount = updatedNotifications.filter(
-        (n) => n.status === 'unread'
-      ).length;
-
-      return {
-        notifications: updatedNotifications,
-        unreadCount,
-      };
-    });
-  },
-
-  markAsRead: (id: string) => {
-    Logger.debug('NotificationStore', 'Marking notification as read', { id });
-
-    set((state) => {
-      const updatedNotifications = state.notifications.map((n) =>
-        n.id === id ? { ...n, status: 'read' as const } : n
-      );
-      const unreadCount = updatedNotifications.filter(
-        (n) => n.status === 'unread'
-      ).length;
-
-      return {
-        notifications: updatedNotifications,
-        unreadCount,
-      };
-    });
-  },
-
-  markAllAsRead: () => {
-    Logger.debug('NotificationStore', 'Marking all notifications as read');
-
-    set((state) => ({
-      notifications: state.notifications.map((n) => ({
-        ...n,
-        status: 'read' as const,
-      })),
-      unreadCount: 0,
-    }));
-  },
-
-  clearNotifications: () => {
-    Logger.warn('NotificationStore', 'Clearing all notifications');
-
-    set({
-      notifications: [],
-      unreadCount: 0,
-    });
-  },
-
-  setNotifications: (notifications: Notification[]) => {
-    Logger.info('NotificationStore', 'Setting notifications', {
-      count: notifications.length,
-    });
-
-    const unreadCount = notifications.filter(
-      (n) => n.status === 'unread'
-    ).length;
-
-    set({
-      notifications,
-      unreadCount,
-      lastFetchedAt: Date.now(),
-    });
-  },
-
-  updateSettings: (settings: Partial<NotificationSettings>) => {
-    Logger.debug('NotificationStore', 'Updating notification settings', {
-      settings: Object.keys(settings),
-    });
-
-    set((state) => ({
-      settings: {
-        ...state.settings,
-        ...settings,
-      },
-    }));
-  },
-
-  setLoading: (loading: boolean) => {
-    set({ isLoading: loading });
-  },
-
-  setError: (error: string | null) => {
-    if (error) {
-      Logger.error('NotificationStore', 'Notification error', { error });
+  loadNotifications: async (params: FetchNotificationsParams = {}) => {
+    set({ isLoading: true, error: null });
+    try {
+      const response = await fetchNotifications({ limit: 50, ...params });
+      set({
+        notifications: response.notifications,
+        unreadCount: countUnread(response.notifications),
+        lastFetchedAt: Date.now(),
+        isLoading: false,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to load notifications';
+      Logger.warn('NotificationStore', 'loadNotifications failed', { message });
+      set({ error: message, isLoading: false });
     }
-    set({ error });
   },
+
+  loadPreferences: async () => {
+    try {
+      const preferences = await fetchNotificationPreferences();
+      set({ preferences });
+    } catch (error) {
+      Logger.warn('NotificationStore', 'loadPreferences failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  },
+
+  updatePreferences: async (patch) => {
+    const next = await updateNotificationPreferences(patch);
+    set({ preferences: next });
+  },
+
+  markAsRead: async (id) => {
+    // Optimistic update first.
+    const before = get().notifications;
+    const optimistic = before.map((n) =>
+      n.id === id ? { ...n, status: 'read' as const, readAt: new Date().toISOString() } : n,
+    );
+    set({ notifications: optimistic, unreadCount: countUnread(optimistic) });
+
+    try {
+      const updated = await markReadApi(id);
+      set((state) => {
+        const next = state.notifications.map((n) => (n.id === id ? updated : n));
+        return { notifications: next, unreadCount: countUnread(next) };
+      });
+    } catch (error) {
+      set({ notifications: before, unreadCount: countUnread(before) });
+      throw error;
+    }
+  },
+
+  markBatchAsRead: async (ids) => {
+    if (ids.length === 0) return;
+    const result = await markBatchReadApi(ids);
+    if (result.markedCount === 0) {
+      Logger.warn('NotificationStore', 'batch read: no notifications marked', result);
+      return;
+    }
+    set((state) => {
+      const set_ = new Set(ids);
+      const next = state.notifications.map((n) =>
+        set_.has(n.id)
+          ? { ...n, status: 'read' as const, readAt: new Date().toISOString() }
+          : n,
+      );
+      return { notifications: next, unreadCount: countUnread(next) };
+    });
+  },
+
+  removeNotification: async (id) => {
+    const before = get().notifications;
+    const optimistic = before.filter((n) => n.id !== id);
+    set({ notifications: optimistic, unreadCount: countUnread(optimistic) });
+    try {
+      await deleteApi(id);
+    } catch (error) {
+      set({ notifications: before, unreadCount: countUnread(before) });
+      throw error;
+    }
+  },
+
+  clearAll: async () => {
+    const before = get().notifications;
+    set({ notifications: [], unreadCount: 0 });
+    try {
+      await clearAllApi();
+    } catch (error) {
+      set({ notifications: before, unreadCount: countUnread(before) });
+      throw error;
+    }
+  },
+
+  setLoading: (loading) => set({ isLoading: loading }),
+  setError: (error) => set({ error }),
 }));

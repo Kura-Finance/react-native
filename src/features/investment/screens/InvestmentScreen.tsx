@@ -1,5 +1,6 @@
 import React, { useMemo, useState, useEffect } from 'react';
 import { View, ScrollView, Text, RefreshControl } from 'react-native';
+import type { InvestmentCategory } from '../../../components/TabNavigator';
 import { useTranslation } from 'react-i18next';
 import { useFinanceStore } from '../../../shared/store/useFinanceStore';
 import { useExchangeStore } from '../../../shared/store/useExchangeStore';
@@ -14,7 +15,32 @@ import ExchangeLinkModal from '../../../shared/components/ExchangeLinkModal';
 import { useInitializePlaidData } from '../../../shared/hooks/useInitializePlaidData';
 import { useRefreshInvestmentData } from '../hooks/useRefreshInvestmentData';
 
-export default function InvestmentScreen() {
+interface InvestmentScreenProps {
+  category?: InvestmentCategory;
+}
+
+/**
+ * Category filter for InvestmentScreen:
+ *
+ *   Stock = broker-held assets via Plaid (stocks, ETFs, and crypto held in a brokerage account).
+ *           Comes from financeInvestments (Plaid). Exchange spot is NOT shown here.
+ *
+ *   Note: TabNav "Crypto" (exchange spot + DeBank tokens) and "DeFi" (DeBank protocols)
+ *   are handled by their own Coming-Soon screens; InvestmentScreen is only used for "Stock".
+ */
+function categoryFilter(type: string, category: InvestmentCategory | undefined): boolean {
+  if (!category || category === 'Transaction') return true;
+  switch (category) {
+    // Stock tab: all Plaid broker-held assets including crypto-in-brokerage
+    case 'Stock':  return type === 'stock' || type === 'etf' || type === 'crypto';
+    // These cases are kept for completeness but currently rendered by ComingSoonScreen
+    case 'Crypto': return type === 'crypto';
+    case 'DeFi':   return type === 'other';
+    default:       return true;
+  }
+}
+
+export default function InvestmentScreen({ category }: InvestmentScreenProps) {
   const { t } = useTranslation();
   // State Management - UI control
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
@@ -57,11 +83,15 @@ export default function InvestmentScreen() {
     ];
   }, [financeInvestmentAccounts, exchangeInvestmentAccounts]);
 
-  // Combine all investments - Plaid + Exchange holdings
-  const investments = useMemo(
-    () => [...financeInvestments, ...exchangeInvestments],
-    [financeInvestments, exchangeInvestments]
-  );
+  // Combine investments depending on category.
+  // Stock tab = Plaid only (broker-held assets); skip exchange spot.
+  // All others = both sources.
+  const investments = useMemo(() => {
+    const sources = category === 'Stock'
+      ? financeInvestments
+      : [...financeInvestments, ...exchangeInvestments];
+    return sources.filter((inv) => categoryFilter(inv.type, category));
+  }, [financeInvestments, exchangeInvestments, category]);
 
   // Auto-fetch exchange balances on first load (single-fetch pattern)
   useEffect(() => {
@@ -93,13 +123,20 @@ export default function InvestmentScreen() {
     }
   }, [investmentAccounts, selectedAccountId]);
 
-  // Filter investments based on selected account
+  // Filter further by selected account capsule
   const displayedInvestments = useMemo(() => {
     if (selectedAccountId) {
-      return investments.filter((investment) => investment.accountId === selectedAccountId);
+      return investments.filter((inv) => inv.accountId === selectedAccountId);
     }
     return investments;
   }, [investments, selectedAccountId]);
+
+  // Only show accounts that actually have holdings in the current category
+  const filteredAccounts = useMemo(() => {
+    if (!category || category === 'Transaction') return investmentAccounts;
+    const accountIds = new Set(investments.map((inv) => inv.accountId));
+    return investmentAccounts.filter((acc) => accountIds.has(acc.id));
+  }, [investmentAccounts, investments, category]);
 
   // Event handlers
   const handleAddAccount = () => {
@@ -143,7 +180,7 @@ export default function InvestmentScreen() {
         )}
 
         <AccountCapsules 
-          accounts={investmentAccounts} 
+          accounts={filteredAccounts} 
           selectedAccountId={selectedAccountId} 
           onSelectAccount={setSelectedAccountId}
           onAddAccount={handleAddAccount}

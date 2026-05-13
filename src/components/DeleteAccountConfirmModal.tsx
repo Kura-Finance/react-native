@@ -4,7 +4,6 @@ import {
   Text,
   Modal,
   TouchableOpacity,
-  TextInput,
   ActivityIndicator,
   Alert,
 } from 'react-native';
@@ -22,20 +21,20 @@ export const DeleteAccountConfirmModal: React.FC<DeleteAccountConfirmModalProps>
   onDismiss,
   onSuccess,
 }) => {
-  const [password, setPassword] = useState('');
+  const [confirmTyped, setConfirmTyped] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const deleteAccount = useAppStore((state) => state.deleteAccount);
 
   const handleDeleteAccount = async () => {
-    if (!password.trim()) {
-      Alert.alert('Error', 'Please enter your password');
+    if (!confirmTyped) {
+      Alert.alert('Confirm', 'Please tap "I understand" to confirm');
       return;
     }
 
     setIsLoading(true);
     try {
-      await deleteAccount(password);
-      setPassword('');
+      await deleteAccount();
+      setConfirmTyped(false);
       onDismiss();
       onSuccess();
     } catch (error) {
@@ -49,7 +48,7 @@ export const DeleteAccountConfirmModal: React.FC<DeleteAccountConfirmModalProps>
   };
 
   const handleCancel = () => {
-    setPassword('');
+    setConfirmTyped(false);
     onDismiss();
   };
 
@@ -102,35 +101,23 @@ export const DeleteAccountConfirmModal: React.FC<DeleteAccountConfirmModalProps>
               This action cannot be undone. All your data, accounts, and investments will be permanently deleted.
             </Text>
 
-            <View style={{ marginBottom: 20 }}>
-              <Text
-                style={{
-                  fontSize: 12,
-                  fontWeight: '600',
-                  color: '#9CA3AF',
-                  marginBottom: 8,
-                }}
-              >
-                Confirm with your password
+            <TouchableOpacity
+              onPress={() => setConfirmTyped((v) => !v)}
+              disabled={isLoading}
+              style={{
+                marginBottom: 20,
+                paddingVertical: 12,
+                paddingHorizontal: 14,
+                borderRadius: 8,
+                borderWidth: 1,
+                borderColor: confirmTyped ? '#EF4444' : 'rgba(255, 255, 255, 0.1)',
+                backgroundColor: confirmTyped ? 'rgba(239, 68, 68, 0.1)' : 'transparent',
+              }}
+            >
+              <Text style={{ color: confirmTyped ? '#FCA5A5' : '#9CA3AF', fontSize: 13, fontWeight: '600' }}>
+                {confirmTyped ? '✓ I understand this is permanent' : 'Tap to confirm: this is permanent'}
               </Text>
-              <TextInput
-                style={{
-                  borderWidth: 1,
-                  borderColor: 'rgba(255, 255, 255, 0.1)',
-                  borderRadius: 8,
-                  paddingHorizontal: 12,
-                  paddingVertical: 10,
-                  color: '#FFFFFF',
-                  fontSize: 14,
-                }}
-                placeholder="Enter your password to confirm"
-                placeholderTextColor="#9CA3AF"
-                secureTextEntry
-                value={password}
-                onChangeText={setPassword}
-                editable={!isLoading}
-              />
-            </View>
+            </TouchableOpacity>
 
             <View
               style={{

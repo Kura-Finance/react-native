@@ -47,7 +47,7 @@ export default function VerifyEmailChangeScreen({ newEmail, onClose, expiresIn }
     try {
       setIsLoading(true);
       Logger.info('VerifyEmailChangeScreen', 'Confirming email change', { newEmail });
-      await confirmEmailChange(verificationCode.trim());
+      await confirmEmailChange(newEmail, verificationCode.trim());
       Logger.info('VerifyEmailChangeScreen', 'Email changed successfully');
       Alert.alert('Success', `Email changed to ${newEmail}`, [
         { text: 'OK', onPress: onClose }
@@ -169,7 +169,7 @@ export default function VerifyEmailChangeScreen({ newEmail, onClose, expiresIn }
 
         {/* Info Text */}
         <Text style={{ color: '#666666', fontSize: 12, marginTop: 24, textAlign: 'center', lineHeight: 18 }}>
-          Didn't receive the code? Check your spam folder or request a new verification code.
+          Didn&apos;t receive the code? Check your spam folder or request a new verification code.
         </Text>
       </ScrollView>
     </View>
