@@ -36,9 +36,12 @@ import {
 } from '../../lib/api/auth';
 import { setAuthTokenProvider } from '../../lib/api/client';
 import { migrateLegacyTokenToSecureStore, secureAuthTokenStore } from '../../lib/secureStorage';
-import { clearAllCache, deleteCache } from '../../lib/cache/dataCache';
-import { deleteCacheKey } from '../../lib/cache/cacheKey';
-import { clearCryptoSession } from '../../lib/crypto/session';
+import { clearAllCache } from '../../lib/cache/dataCache';
+import { clearCryptoSession, getCryptoSession } from '../../lib/crypto/session';
+import {
+  deleteBiometricKey,
+  saveBiometricPrivateKey,
+} from '../../lib/security/biometricSession';
 import {
   createPlaidLinkToken,
   disconnectPlaidItem,
@@ -218,6 +221,15 @@ export const useAppStore = create<AppState>((set, get) => {
           throw error;
         }
 
+        // Save private key under biometric protection for AppLock restore.
+        const session = getCryptoSession();
+        if (session) {
+          void saveBiometricPrivateKey(
+            session.x25519PrivateKey,
+            session.x25519PublicKeyBase64,
+          );
+        }
+
         set({
           authStatus: 'authenticated',
           userProfile: toLocalProfile(user),
@@ -252,7 +264,7 @@ export const useAppStore = create<AppState>((set, get) => {
       }
       clearCryptoSession();
       await secureAuthTokenStore.clear();
-      // Clear local data cache so the next user doesn't see stale data
+      void deleteBiometricKey();
       void clearAllCache();
 
       useFinanceStore.getState().clearPlaidFinanceData();
@@ -277,8 +289,8 @@ export const useAppStore = create<AppState>((set, get) => {
       await deleteCurrentAccount();
       clearCryptoSession();
       await secureAuthTokenStore.clear();
+      void deleteBiometricKey();
       void clearAllCache();
-      void deleteCacheKey();
 
       const finance = useFinanceStore.getState();
       finance.setAccounts([]);
@@ -333,6 +345,15 @@ export const useAppStore = create<AppState>((set, get) => {
           result.derivedKeys.dekWrapKey.fill(0);
           result.derivedKeys.localCacheKey.fill(0);
           throw error;
+        }
+
+        // Save private key under biometric protection for AppLock restore.
+        const session = getCryptoSession();
+        if (session) {
+          void saveBiometricPrivateKey(
+            session.x25519PrivateKey,
+            session.x25519PublicKeyBase64,
+          );
         }
 
         set({

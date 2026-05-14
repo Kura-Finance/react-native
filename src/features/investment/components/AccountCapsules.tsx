@@ -1,5 +1,5 @@
 import React from 'react';
-import { ScrollView, Image, TouchableOpacity, Text } from 'react-native';
+import { ScrollView, View, Image, TouchableOpacity, Text } from 'react-native';
 import { useTranslation } from 'react-i18next';
 
 interface Account {
@@ -55,11 +55,15 @@ export default function AccountCapsules({ accounts, selectedAccountId, onSelectA
             gap: 8,
           }}
         >
-          <Image
-            source={{ uri: account.logo }}
-            style={{ width: 20, height: 20, borderRadius: 10 }}
-            resizeMode="contain"
-          />
+          {account.logo ? (
+            <Image
+              source={{ uri: account.logo }}
+              style={{ width: 20, height: 20, borderRadius: 10 }}
+              resizeMode="contain"
+            />
+          ) : (
+            <View style={{ width: 20, height: 20, borderRadius: 10, backgroundColor: 'rgba(255,255,255,0.15)' }} />
+          )}
           <Text style={{ color: '#FFFFFF', fontSize: 12, fontWeight: '600' }}>
             {account.name}
           </Text>

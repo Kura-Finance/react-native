@@ -18,7 +18,7 @@ export interface CryptoSession {
   x25519PublicKeyBase64: string;
   /** AES-256-GCM key used to wrap/unwrap encryptedPrivateKey. 32 bytes. */
   dekWrapKey: Uint8Array;
-  /** AES-256-GCM key used for the local encrypted cache. 32 bytes. */
+  /** AES-256-GCM key derived from password (HKDF). Reserved for future use. 32 bytes. */
   localCacheKey: Uint8Array;
 }
 

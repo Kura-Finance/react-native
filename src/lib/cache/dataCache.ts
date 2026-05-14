@@ -1,55 +1,51 @@
 /**
- * Local encrypted data cache.
+ * Raw encrypted data cache.
  *
- * Serialises arbitrary data as JSON → encrypts with AES-256-GCM (cacheKey) →
- * stores in AsyncStorage. On reload (CryptoSession gone), reads cached plaintext
- * so the UI doesn't show empty screens.
+ * Stores the raw E2EE-encrypted API envelope (wrappedSek + ciphertext rows)
+ * directly in AsyncStorage without any re-encryption. The data is already
+ * encrypted by the backend and can only be decrypted with the user's
+ * X25519 private key — safe to store at rest as-is.
+ *
+ * To show cached data when the in-memory CryptoSession has been cleared
+ * (e.g. after AppLock fires), the caller restores the private key via
+ * biometric auth (`restoreWithBiometrics`) and passes it directly to the
+ * decrypt-from-cache helpers in each API client.
  *
  * Cache entry format in AsyncStorage:
- *   { v: 1, iv: base64(12B), ct: base64(iv|tag|ciphertext), ts: ISO }
+ *   { v: 2, data: <raw API envelope>, ts: ISO }
  */
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { getCacheKey } from './cacheKey';
-import { aesGcmEncrypt, aesGcmDecrypt, AES_GCM_IV_BYTES, AES_GCM_TAG_BYTES } from '../crypto/aesgcm';
-import { randomBytes } from '../crypto/random';
-import { bytesToBase64, base64ToBytes, bytesToUtf8, utf8ToBytes } from '../crypto/encoding';
 import Logger from '../../shared/utils/Logger';
 
-const CACHE_VERSION = 1;
-const CACHE_PREFIX = 'kura.datacache.';
+const CACHE_VERSION = 2;
+const CACHE_PREFIX = 'kura.rawcache.';
+/** Legacy prefix — cleared by clearAllCache during migration. */
+const LEGACY_CACHE_PREFIX = 'kura.datacache.';
 
-interface CacheEntry {
+interface RawCacheEntry {
   v: number;
-  /** base64 of: iv(12) | tag(16) | ciphertext */
-  ct: string;
+  /** Raw API response (still E2EE-encrypted JSON) */
+  data: unknown;
   /** ISO timestamp of when the entry was written */
   ts: string;
+}
+
+export interface CacheResult<T> {
+  data: T;
+  /** ISO timestamp the cache was last written */
+  cachedAt: string;
 }
 
 // ─────────────────────────────────────────────────────────────
 // Write
 // ─────────────────────────────────────────────────────────────
 
-export async function writeCache<T>(namespace: string, data: T): Promise<void> {
+export async function writeRawCache<T>(namespace: string, data: T): Promise<void> {
   try {
-    const cacheKey = await getCacheKey();
-    const plaintext = utf8ToBytes(JSON.stringify(data));
-    const iv = randomBytes(AES_GCM_IV_BYTES);
-    const ctTag = aesGcmEncrypt(cacheKey, iv, plaintext);
-
-    // Pack: iv | tag | ct  (iv=12, tag=16, ct=rest)
-    // ctTag from noble = ct || tag, so re-order to match our unpackIvTagCt convention
-    const ct = ctTag.slice(0, ctTag.length - AES_GCM_TAG_BYTES);
-    const tag = ctTag.slice(ctTag.length - AES_GCM_TAG_BYTES);
-    const packed = new Uint8Array(iv.length + tag.length + ct.length);
-    packed.set(iv, 0);
-    packed.set(tag, iv.length);
-    packed.set(ct, iv.length + tag.length);
-
-    const entry: CacheEntry = {
+    const entry: RawCacheEntry = {
       v: CACHE_VERSION,
-      ct: bytesToBase64(packed),
+      data,
       ts: new Date().toISOString(),
     };
     await AsyncStorage.setItem(`${CACHE_PREFIX}${namespace}`, JSON.stringify(entry));
@@ -64,44 +60,22 @@ export async function writeCache<T>(namespace: string, data: T): Promise<void> {
 // Read
 // ─────────────────────────────────────────────────────────────
 
-export interface CacheResult<T> {
-  data: T;
-  /** ISO timestamp the cache was last written */
-  cachedAt: string;
-}
-
-export async function readCache<T>(namespace: string): Promise<CacheResult<T> | null> {
+export async function readRawCache<T>(namespace: string): Promise<CacheResult<T> | null> {
   try {
     const raw = await AsyncStorage.getItem(`${CACHE_PREFIX}${namespace}`);
     if (!raw) return null;
 
-    const entry: CacheEntry = JSON.parse(raw);
+    const entry: RawCacheEntry = JSON.parse(raw);
     if (entry.v !== CACHE_VERSION) {
       await AsyncStorage.removeItem(`${CACHE_PREFIX}${namespace}`);
       return null;
     }
 
-    const cacheKey = await getCacheKey();
-    const packed = base64ToBytes(entry.ct);
-    if (packed.length < AES_GCM_IV_BYTES + AES_GCM_TAG_BYTES) return null;
-
-    const iv  = packed.slice(0, AES_GCM_IV_BYTES);
-    const tag = packed.slice(AES_GCM_IV_BYTES, AES_GCM_IV_BYTES + AES_GCM_TAG_BYTES);
-    const ct  = packed.slice(AES_GCM_IV_BYTES + AES_GCM_TAG_BYTES);
-
-    // noble gcm.decrypt expects ct || tag
-    const ctWithTag = new Uint8Array(ct.length + tag.length);
-    ctWithTag.set(ct, 0);
-    ctWithTag.set(tag, ct.length);
-
-    const plain = aesGcmDecrypt(cacheKey, iv, ctWithTag);
-    const data: T = JSON.parse(bytesToUtf8(plain));
-    return { data, cachedAt: entry.ts };
+    return { data: entry.data as T, cachedAt: entry.ts };
   } catch (error) {
     Logger.warn('DataCache', `Read failed for ${namespace}`, {
       error: error instanceof Error ? error.message : String(error),
     });
-    await AsyncStorage.removeItem(`${CACHE_PREFIX}${namespace}`).catch(() => {});
     return null;
   }
 }
@@ -110,16 +84,18 @@ export async function readCache<T>(namespace: string): Promise<CacheResult<T> | 
 // Delete / Clear
 // ─────────────────────────────────────────────────────────────
 
-export async function deleteCache(namespace: string): Promise<void> {
+export async function deleteRawCache(namespace: string): Promise<void> {
   await AsyncStorage.removeItem(`${CACHE_PREFIX}${namespace}`).catch(() => {});
 }
 
 export async function clearAllCache(): Promise<void> {
   try {
     const keys = await AsyncStorage.getAllKeys();
-    const cacheKeys = keys.filter((k) => k.startsWith(CACHE_PREFIX));
-    if (cacheKeys.length > 0) {
-      await AsyncStorage.multiRemove(cacheKeys);
+    const toRemove = keys.filter(
+      (k) => k.startsWith(CACHE_PREFIX) || k.startsWith(LEGACY_CACHE_PREFIX),
+    );
+    if (toRemove.length > 0) {
+      await AsyncStorage.multiRemove(toRemove);
     }
   } catch {
     // best-effort

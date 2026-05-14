@@ -41,7 +41,13 @@ export default function HoldingCard({ investment, totalValue }: HoldingCardProps
     >
       <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1, paddingRight: 12 }}>
         <View style={{ width: 36, height: 36, borderRadius: 18, backgroundColor: 'rgba(255,255,255,0.1)', alignItems: 'center', justifyContent: 'center', marginRight: 12, overflow: 'hidden' }}>
-          <Image source={{ uri: investment.logo }} style={{ width: 36, height: 36, borderRadius: 18 }} resizeMode="cover" />
+          {investment.logo ? (
+            <Image source={{ uri: investment.logo }} style={{ width: 36, height: 36, borderRadius: 18 }} resizeMode="cover" />
+          ) : (
+            <Text style={{ fontSize: 16, color: '#FFFFFF', fontWeight: '700' }}>
+              {(investment.symbol ?? '?').slice(0, 1)}
+            </Text>
+          )}
         </View>
         <View style={{ flex: 1 }}>
           <Text style={{ color: '#FFFFFF', fontSize: 14, fontWeight: '600' }}>{investment.symbol}</Text>

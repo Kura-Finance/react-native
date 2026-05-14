@@ -9,16 +9,22 @@
  * Consumer interface (`assetHistory: AssetSnapshot[]` with `timestamp` ms +
  * `totalAssets`) is preserved so `WaveChart` / `PerformanceSummary` keep
  * working unchanged.
+ *
+ * Cache strategy:
+ *   - On success: `fetchAssetHistory` internally writes the raw encrypted
+ *     envelope to AsyncStorage (no re-encryption).
+ *   - On failure (network error or CryptoSession cleared by AppLock):
+ *     prompt biometric auth → restore X25519 private key → decrypt raw cache.
  */
 
 import { StateCreator } from 'zustand';
 import { AssetSnapshot, FinanceState, HistoryState } from './types';
-import { fetchAssetHistory } from '../../../lib/api/asset';
+import { fetchAssetHistory, fetchAssetHistoryFromCache } from '../../../lib/api/asset';
+import { restoreWithBiometrics } from '../../../lib/security/biometricSession';
+import { setCryptoSession } from '../../../lib/crypto/session';
+import { base64ToBytes } from '../../../lib/crypto/encoding';
 import Logger from '../../utils/Logger';
 import { isStablecoin } from '../../utils/stablecoinUtils';
-import { readCache, writeCache } from '../../../lib/cache/dataCache';
-
-const HISTORY_CACHE_NS = 'asset.history';
 
 const DEFAULT_DAYS = 365;
 
@@ -63,9 +69,6 @@ export const createHistorySlice: StateCreator<FinanceState, [], [], HistoryState
       const points = await fetchAssetHistory(days);
       const snapshots = points.map(toAssetSnapshot);
 
-      // Persist to local cache so charts survive a JS reload
-      void writeCache<AssetSnapshot[]>(HISTORY_CACHE_NS, snapshots);
-
       set({
         assetHistory: snapshots,
         lastRecordedTime: Date.now(),
@@ -75,18 +78,45 @@ export const createHistorySlice: StateCreator<FinanceState, [], [], HistoryState
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to fetch asset history';
 
-      // Fall back to local encrypted cache
-      const cached = await readCache<AssetSnapshot[]>(HISTORY_CACHE_NS).catch(() => null);
-      if (cached) {
-        Logger.warn('HistorySlice', 'Using cached asset history (CryptoSession unavailable)', {
-          cachedAt: cached.cachedAt,
-          points: cached.data.length,
+      // Try biometric restore → decrypt raw cache.
+      Logger.warn('HistorySlice', 'Live fetch failed; attempting biometric cache restore', {
+        message,
+      });
+      try {
+        const keys = await restoreWithBiometrics();
+        if (keys) {
+          // Rebuild a partial CryptoSession so subsequent fresh fetches also work.
+          setCryptoSession({
+            x25519PrivateKey: keys.x25519PrivateKey,
+            x25519PublicKeyBase64: keys.x25519PublicKeyBase64,
+            dekWrapKey: new Uint8Array(32),
+            localCacheKey: new Uint8Array(32),
+          });
+
+          const points = await fetchAssetHistoryFromCache(
+            {},
+            {
+              privateKey: keys.x25519PrivateKey,
+              publicKey: base64ToBytes(keys.x25519PublicKeyBase64),
+            },
+          );
+          if (points) {
+            const snapshots = points.map(toAssetSnapshot);
+            Logger.warn('HistorySlice', 'Serving asset history from biometric-restored cache', {
+              points: snapshots.length,
+            });
+            set({
+              assetHistory: snapshots,
+              isLoadingAssetHistory: false,
+            });
+            return;
+          }
+        }
+      } catch (biometricError) {
+        Logger.warn('HistorySlice', 'Biometric cache restore failed', {
+          error:
+            biometricError instanceof Error ? biometricError.message : String(biometricError),
         });
-        set({
-          assetHistory: cached.data,
-          isLoadingAssetHistory: false,
-        });
-        return;
       }
 
       Logger.warn('HistorySlice', 'Asset history hydration failed', { message });

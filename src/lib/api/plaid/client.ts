@@ -14,11 +14,12 @@
  */
 
 import { requestJson } from '../client';
-import { decryptEnvelopeRows } from '../../crypto/envelope';
+import { decryptEnvelopeRows, type UnwrapEnvelopeOptions } from '../../crypto/envelope';
 import {
   encryptedFinanceSnapshotSchema,
   type AccountSensitive,
   type EncryptedAccountRow,
+  type EncryptedFinanceSnapshotV1,
   type EncryptedInvestmentAccountRow,
   type EncryptedInvestmentRow,
   type EncryptedTransactionRow,
@@ -36,7 +37,10 @@ import type {
   PlaidInvestmentType,
   PlaidTransaction,
 } from './types';
+import { writeRawCache, readRawCache } from '../../cache/dataCache';
 import Logger from '../../../shared/utils/Logger';
+
+const PLAID_RAW_CACHE_NS = 'plaid.envelope';
 
 const apiName = 'PlaidApi';
 
@@ -131,37 +135,35 @@ function normalizeInvestmentType(value: string): PlaidInvestmentType {
   return INVESTMENT_TYPES.has(value as PlaidInvestmentType) ? (value as PlaidInvestmentType) : 'other';
 }
 
-/**
- * One-shot read path: GET → zod parse → decrypt every row → return plaintext.
- *
- * If a row fails to decrypt (e.g. the matching payloadKey was rotated since
- * the row was written), we drop it and log a warning; the rest of the
- * snapshot still renders.
- */
-export async function fetchPlaidFinanceSnapshot(): Promise<PlaidFinanceSnapshot> {
-  const raw = await requestJson<unknown>('/api/plaid/finance-snapshot/encrypted', {
-    method: 'GET',
-    apiName,
-  });
-  const envelope = encryptedFinanceSnapshotSchema.parse(raw);
+// ─────────────────────────────────────────────────────────────
+// Shared decrypt helper
+// ─────────────────────────────────────────────────────────────
 
+async function decryptEnvelope(
+  envelope: EncryptedFinanceSnapshotV1,
+  opts: UnwrapEnvelopeOptions = {},
+): Promise<PlaidFinanceSnapshot> {
   const [accountsResult, transactionsResult, investmentAccountsResult, investmentsResult] =
     await Promise.all([
       decryptEnvelopeRows<AccountSensitive, EncryptedAccountRow>(
         envelope.payloadKeys,
         envelope.accounts,
+        opts,
       ),
       decryptEnvelopeRows<TransactionSensitive, EncryptedTransactionRow>(
         envelope.payloadKeys,
         envelope.transactions,
+        opts,
       ),
       decryptEnvelopeRows<InvestmentAccountSensitive, EncryptedInvestmentAccountRow>(
         envelope.payloadKeys,
         envelope.investmentAccounts,
+        opts,
       ),
       decryptEnvelopeRows<InvestmentSensitive, EncryptedInvestmentRow>(
         envelope.payloadKeys,
         envelope.investments,
+        opts,
       ),
     ]);
 
@@ -226,4 +228,50 @@ export async function fetchPlaidFinanceSnapshot(): Promise<PlaidFinanceSnapshot>
     lastSyncedAt: envelope.lastSyncedAt,
     decryptionFailureCount,
   };
+}
+
+/**
+ * One-shot read path: GET → zod parse → cache raw envelope → decrypt → return plaintext.
+ *
+ * If a row fails to decrypt (e.g. the matching payloadKey was rotated since
+ * the row was written), we drop it and log a warning; the rest of the
+ * snapshot still renders.
+ */
+export async function fetchPlaidFinanceSnapshot(): Promise<PlaidFinanceSnapshot> {
+  const raw = await requestJson<unknown>('/api/plaid/finance-snapshot/encrypted', {
+    method: 'GET',
+    apiName,
+  });
+  const envelope = encryptedFinanceSnapshotSchema.parse(raw);
+
+  // Persist raw encrypted envelope — no re-encryption needed (data is already E2EE).
+  void writeRawCache<EncryptedFinanceSnapshotV1>(PLAID_RAW_CACHE_NS, envelope);
+
+  return decryptEnvelope(envelope);
+}
+
+/**
+ * Decrypt the most recent locally-cached Plaid envelope.
+ *
+ * Pass `opts` with `{ privateKey, publicKey }` when the in-memory CryptoSession
+ * is unavailable (e.g. after biometric restore following AppLock). If `opts` is
+ * omitted the current CryptoSession is used.
+ *
+ * Returns `null` if no cache exists or if decryption fails (stale SEK).
+ */
+export async function fetchPlaidFromCache(
+  opts?: UnwrapEnvelopeOptions,
+): Promise<PlaidFinanceSnapshot | null> {
+  try {
+    const cached = await readRawCache<EncryptedFinanceSnapshotV1>(PLAID_RAW_CACHE_NS);
+    if (!cached) return null;
+
+    const envelope = encryptedFinanceSnapshotSchema.parse(cached.data);
+    return await decryptEnvelope(envelope, opts);
+  } catch (error) {
+    Logger.warn(apiName, 'fetchPlaidFromCache failed', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
 }

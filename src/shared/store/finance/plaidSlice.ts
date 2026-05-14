@@ -5,29 +5,29 @@
  *
  * The actual fetch + decrypt is in `src/lib/api/plaid/client.ts`; this slice
  * only owns the projection + state wiring.
+ *
+ * Cache strategy:
+ *   - On success: `fetchPlaidFinanceSnapshot` internally writes the raw
+ *     encrypted envelope to AsyncStorage (no re-encryption).
+ *   - On failure (network error or CryptoSession cleared by AppLock):
+ *     prompt biometric auth → restore X25519 private key → decrypt raw cache.
  */
 
 import { StateCreator } from 'zustand';
 import {
   fetchPlaidFinanceSnapshot,
+  fetchPlaidFromCache,
   type PlaidAccount,
   type PlaidInvestment,
   type PlaidInvestmentAccount,
   type PlaidTransaction,
 } from '../../../lib/api/plaid';
 import { KuraApiError } from '../../../lib/api/errors';
+import { restoreWithBiometrics } from '../../../lib/security/biometricSession';
+import { setCryptoSession } from '../../../lib/crypto/session';
+import { base64ToBytes } from '../../../lib/crypto/encoding';
 import Logger from '../../utils/Logger';
-import { readCache, writeCache } from '../../../lib/cache/dataCache';
 
-const PLAID_CACHE_NS = 'plaid.snapshot';
-
-interface PlaidCacheShape {
-  accounts: PlaidAccount[];
-  transactions: PlaidTransaction[];
-  investmentAccounts: PlaidInvestmentAccount[];
-  investments: PlaidInvestment[];
-  lastSyncedAt: string | null;
-}
 import {
   Account,
   AccountBucket,
@@ -112,84 +112,89 @@ function toStoreInvestment(inv: PlaidInvestment): Investment {
   };
 }
 
-export const createPlaidSlice: StateCreator<FinanceState, [], [], PlaidState> = (set) => ({
+function applySnapshot(
+  set: Parameters<StateCreator<FinanceState, [], [], PlaidState>>[0],
+  state: Parameters<StateCreator<FinanceState, [], [], PlaidState>>[1],
+  snapshot: {
+    accounts: PlaidAccount[];
+    transactions: PlaidTransaction[];
+    investmentAccounts: PlaidInvestmentAccount[];
+    investments: PlaidInvestment[];
+    lastSyncedAt?: string | null;
+  },
+  cacheLabel?: string,
+): void {
+  const nextAccounts = snapshot.accounts.map(toStoreAccount);
+  const nextTransactions = snapshot.transactions.map(toStoreTransaction);
+  const nextPlaidInvAccounts = snapshot.investmentAccounts.map(toStoreInvestmentAccount);
+  const nextPlaidInvestments = snapshot.investments.map(toStoreInvestment);
+
+  set((s) => {
+    const nonPlaidAccounts = s.investmentAccounts.filter(
+      (a) => a.type === 'Web3 Wallet' || a.type === 'Exchange',
+    );
+    const nonPlaidInvestments = s.investments.filter((i) =>
+      nonPlaidAccounts.some((a) => a.id === i.accountId),
+    );
+    return {
+      accounts: nextAccounts,
+      transactions: nextTransactions,
+      investmentAccounts: [...nextPlaidInvAccounts, ...nonPlaidAccounts],
+      investments: [...nextPlaidInvestments, ...nonPlaidInvestments],
+      isLoadingPlaidData: false,
+      lastRefreshInfo: null,
+      cacheSource: cacheLabel ?? snapshot.lastSyncedAt ?? null,
+    };
+  });
+
+  void state;
+}
+
+export const createPlaidSlice: StateCreator<FinanceState, [], [], PlaidState> = (set, get) => ({
   isLoadingPlaidData: false,
   plaidError: null,
   lastRefreshInfo: null,
   cacheSource: null,
 
   hydratePlaidFinanceData: async (_token: string, _refresh: boolean = false) => {
+    set({ isLoadingPlaidData: true, plaidError: null });
     try {
-      set({ isLoadingPlaidData: true, plaidError: null });
-
       const snapshot = await fetchPlaidFinanceSnapshot();
-
-      // Persist plaintext to local encrypted cache so data survives a JS reload
-      // even when the CryptoSession is not available.
-      void writeCache<PlaidCacheShape>(PLAID_CACHE_NS, {
-        accounts: snapshot.accounts,
-        transactions: snapshot.transactions,
-        investmentAccounts: snapshot.investmentAccounts,
-        investments: snapshot.investments,
-        lastSyncedAt: snapshot.lastSyncedAt,
-      });
-
-      const nextAccounts = snapshot.accounts.map(toStoreAccount);
-      const nextTransactions = snapshot.transactions.map(toStoreTransaction);
-      const nextPlaidInvAccounts = snapshot.investmentAccounts.map(toStoreInvestmentAccount);
-      const nextPlaidInvestments = snapshot.investments.map(toStoreInvestment);
-
-      set((state) => {
-        // Preserve Web3 Wallet / Exchange entries — those are managed by other
-        // slices and the encrypted Plaid endpoint never owns them.
-        const nonPlaidAccounts = state.investmentAccounts.filter(
-          (account) => account.type === 'Web3 Wallet' || account.type === 'Exchange',
-        );
-        const nonPlaidInvestments = state.investments.filter((investment) =>
-          nonPlaidAccounts.some((account) => account.id === investment.accountId),
-        );
-
-        return {
-          accounts: nextAccounts,
-          transactions: nextTransactions,
-          investmentAccounts: [...nextPlaidInvAccounts, ...nonPlaidAccounts],
-          investments: [...nextPlaidInvestments, ...nonPlaidInvestments],
-          isLoadingPlaidData: false,
-          lastRefreshInfo: null,
-          cacheSource: snapshot.lastSyncedAt ?? null,
-        };
-      });
+      applySnapshot(set, get, snapshot);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to fetch Plaid finance data';
       const code = error instanceof KuraApiError ? error.code : undefined;
 
-      // Try to load from local encrypted cache (survives CryptoSession loss after JS reload).
-      const cached = await readCache<PlaidCacheShape>(PLAID_CACHE_NS).catch(() => null);
-      if (cached) {
-        Logger.warn('PlaidSlice', 'Using cached Plaid data (CryptoSession unavailable)', {
-          cachedAt: cached.cachedAt,
+      // Try biometric restore → decrypt raw cache.
+      Logger.warn('PlaidSlice', 'Live fetch failed; attempting biometric cache restore', {
+        message,
+      });
+      try {
+        const keys = await restoreWithBiometrics();
+        if (keys) {
+          // Rebuild a partial CryptoSession so subsequent fresh fetches also work.
+          setCryptoSession({
+            x25519PrivateKey: keys.x25519PrivateKey,
+            x25519PublicKeyBase64: keys.x25519PublicKeyBase64,
+            dekWrapKey: new Uint8Array(32),
+            localCacheKey: new Uint8Array(32),
+          });
+
+          const cached = await fetchPlaidFromCache({
+            privateKey: keys.x25519PrivateKey,
+            publicKey: base64ToBytes(keys.x25519PublicKeyBase64),
+          });
+          if (cached) {
+            Logger.warn('PlaidSlice', 'Serving Plaid data from biometric-restored cache');
+            applySnapshot(set, get, cached, `Cached at ${new Date().toISOString()}`);
+            return;
+          }
+        }
+      } catch (biometricError) {
+        Logger.warn('PlaidSlice', 'Biometric cache restore failed', {
+          error:
+            biometricError instanceof Error ? biometricError.message : String(biometricError),
         });
-        const nextAccounts = cached.data.accounts.map(toStoreAccount);
-        const nextTransactions = cached.data.transactions.map(toStoreTransaction);
-        const nextPlaidInvAccounts = cached.data.investmentAccounts.map(toStoreInvestmentAccount);
-        const nextPlaidInvestments = cached.data.investments.map(toStoreInvestment);
-        set((state) => {
-          const nonPlaidAccounts = state.investmentAccounts.filter(
-            (a) => a.type === 'Web3 Wallet' || a.type === 'Exchange',
-          );
-          const nonPlaidInvestments = state.investments.filter((i) =>
-            nonPlaidAccounts.some((a) => a.id === i.accountId),
-          );
-          return {
-            accounts: nextAccounts,
-            transactions: nextTransactions,
-            investmentAccounts: [...nextPlaidInvAccounts, ...nonPlaidAccounts],
-            investments: [...nextPlaidInvestments, ...nonPlaidInvestments],
-            isLoadingPlaidData: false,
-            cacheSource: `Cached at ${cached.cachedAt}`,
-          };
-        });
-        return; // served from cache — don't throw
       }
 
       Logger.warn('PlaidSlice', 'Failed to hydrate Plaid data', { message, code });
