@@ -51,6 +51,10 @@ module.exports = {
     },
     android: {
       package: "com.kurafinance.app",
+      permissions: [
+        "android.permission.USE_BIOMETRIC",
+        "android.permission.USE_FINGERPRINT",
+      ],
       adaptiveIcon: {
         foregroundImage: "./assets/adaptive-icon.png",
         backgroundImage: "./assets/android-background.png",
