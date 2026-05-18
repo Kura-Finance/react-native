@@ -177,6 +177,7 @@ export async function requestJson<T>(
       status: response.status,
       code: apiError.code,
       message: apiError.message,
+      details: apiError.details,
     });
     throw apiError;
   }
@@ -187,6 +188,7 @@ export async function requestJson<T>(
       url,
       code: apiError.code,
       message: apiError.message,
+      details: apiError.details,
     });
     throw apiError;
   }

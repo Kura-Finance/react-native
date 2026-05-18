@@ -34,16 +34,19 @@ export default function ProfileSecurityScreen({ onClose }: ProfileSecurityScreen
 
   useEffect(() => {
     void (async () => {
-      // Lazy require — expo-local-authentication uses requireNativeModule() at
-      // module level; loading it eagerly (before the native bridge is ready)
-      // causes a "runtime not ready" crash. Requiring inside a useEffect ensures
-      // the native module is already registered.
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const LA = require('expo-local-authentication') as typeof import('expo-local-authentication');
-      const [hasHardware, keyExists] = await Promise.all([
+      const [hasHardware, supportedTypes, isEnrolled, keyExists] = await Promise.all([
         LA.hasHardwareAsync(),
+        LA.supportedAuthenticationTypesAsync(),
+        LA.isEnrolledAsync(),
         hasBiometricKey(),
       ]);
+      console.log('[BiometricDebug] hasHardware:', hasHardware);
+      console.log('[BiometricDebug] supportedTypes:', supportedTypes);
+      console.log('[BiometricDebug] isEnrolled:', isEnrolled);
+      console.log('[BiometricDebug] hasBiometricKey:', keyExists);
+      console.log('[BiometricDebug] SecurityLevel:', await LA.getEnrolledLevelAsync());
       setIsBiometricSupported(hasHardware);
       setIsBiometricActive(keyExists);
     })();
@@ -89,26 +92,46 @@ export default function ProfileSecurityScreen({ onClose }: ProfileSecurityScreen
       const LA = require('expo-local-authentication') as typeof import('expo-local-authentication');
 
       const isEnrolled = await LA.isEnrolledAsync();
+      console.log('[BiometricDebug] Toggle → isEnrolled:', isEnrolled);
       if (!isEnrolled) {
+        console.log('[BiometricDebug] Aborting: not enrolled');
         Alert.alert('', t('settings.biometricNotEnrolled'));
         return;
       }
 
       const session = getCryptoSession();
+      console.log('[BiometricDebug] CryptoSession present:', !!session);
+      console.log('[BiometricDebug] CryptoSession pubKey:', session?.x25519PublicKeyBase64?.slice(0, 8) ?? 'null');
       if (!session) {
         Alert.alert('', t('settings.biometricNoCryptoSession'));
         return;
       }
 
+      console.log('[BiometricDebug] Calling LA.authenticateAsync...');
       const result = await LA.authenticateAsync({
         promptMessage: t('settings.biometricConfirmPrompt'),
         fallbackLabel: '',
         disableDeviceFallback: false,
       });
+      console.log('[BiometricDebug] authenticateAsync result:', JSON.stringify(result));
 
-      if (!result.success) return;
+      if (!result.success) {
+        console.log('[BiometricDebug] Auth not successful, aborting');
+        return;
+      }
 
-      await saveBiometricPrivateKey(session.x25519PrivateKey, session.x25519PublicKeyBase64);
+      console.log('[BiometricDebug] Calling saveBiometricPrivateKey...');
+      try {
+        await saveBiometricPrivateKey(session.x25519PrivateKey, session.x25519PublicKeyBase64);
+        console.log('[BiometricDebug] saveBiometricPrivateKey succeeded');
+      } catch (saveErr) {
+        console.error('[BiometricDebug] saveBiometricPrivateKey FAILED:', saveErr);
+        throw saveErr;
+      }
+
+      const verifyKey = await hasBiometricKey();
+      console.log('[BiometricDebug] hasBiometricKey after save:', verifyKey);
+
       setIsBiometricActive(true);
       Alert.alert('', t('settings.biometricUnlockSuccess'));
     } finally {

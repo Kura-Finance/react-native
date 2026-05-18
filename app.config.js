@@ -30,6 +30,7 @@ module.exports = {
         ITSAppUsesNonExemptEncryption: false,
         NSLocalNetworkUsageDescription: "This app needs access to your local network to connect to financial services",
         NSBonjourServiceTypes: ["_http._tcp", "_https._tcp"],
+        NSFaceIDUsageDescription: "Kura uses Face ID to unlock the app after it has been in the background.",
         NSCameraUsageDescription: "We need access to your camera to take a photo for your profile picture",
         NSPhotoLibraryUsageDescription: "We need access to your photo library to select a profile picture",
         // Wallet detection - allows AppKit to detect installed wallets on iOS

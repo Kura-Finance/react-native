@@ -1,3 +1,7 @@
+// MUST be first import — patches Object.defineProperty so getter-only `default`
+// exports don't throw "Cannot assign to property 'default' which has only a getter"
+// in Hermes during module init.
+import './shims/defaultWritable';
 import '@walletconnect/react-native-compat';
 import React, { useEffect, useState } from 'react';
 import { View, ActivityIndicator, Text } from 'react-native';

@@ -15,6 +15,7 @@
 import { SRPClientSession, SRPParameters, SRPRoutines } from 'tssrp6a';
 import { requestJson } from '../client';
 import type { UserProfileV1 } from './schemas';
+import Logger from '../../../shared/utils/Logger';
 
 const SRP_PARAMS = new SRPParameters();
 const SRP_ROUTINES = new SRPRoutines(SRP_PARAMS);
@@ -45,6 +46,7 @@ export interface SrpVerifyResponse {
 }
 
 export async function getSrpSalts(email: string): Promise<SrpSaltResponse> {
+  Logger.debug('SrpApi', 'getSrpSalts request', { emailLength: email.length, emailValid: email.includes('@') && email.includes('.') });
   return requestJson<SrpSaltResponse>('/api/auth/srp/salt', {
     method: 'POST',
     body: JSON.stringify({ email }),

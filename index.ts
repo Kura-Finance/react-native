@@ -1,3 +1,7 @@
+// Must be first — patches Object.defineProperty so getter-only `default` exports
+// don't throw "Cannot assign to property 'default' which has only a getter" in Hermes.
+import './shims/defaultWritable';
+
 // 💡 必须是第一个导入 - 为 React Native 设置 WalletConnect 所需的 polyfills
 import '@walletconnect/react-native-compat';
 

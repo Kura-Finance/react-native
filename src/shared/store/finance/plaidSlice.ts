@@ -3,14 +3,17 @@
  * snapshot endpoint and projects the decrypted records onto the store-facing
  * `Account` / `Transaction` / `InvestmentAccount` / `Investment` shapes.
  *
- * The actual fetch + decrypt is in `src/lib/api/plaid/client.ts`; this slice
- * only owns the projection + state wiring.
- *
- * Cache strategy:
- *   - On success: `fetchPlaidFinanceSnapshot` internally writes the raw
- *     encrypted envelope to AsyncStorage (no re-encryption).
- *   - On failure (network error or CryptoSession cleared by AppLock):
- *     prompt biometric auth → restore X25519 private key → decrypt raw cache.
+ * Error + cache strategy:
+ *   ┌─ Live fetch fails
+ *   │
+ *   ├─ "No active crypto session" (AppLock fired)
+ *   │     → Biometric restore (Face ID / Touch ID)
+ *   │         → success : rebuild partial session → decrypt raw cache → show data
+ *   │         → failure : no biometric key or cancelled → logout()
+ *   │
+ *   └─ Any other error (network, 5xx, …)
+ *         → Decrypt raw cache with existing CryptoSession (stale-data UX)
+ *         → No biometric prompt for non-session errors
  */
 
 import { StateCreator } from 'zustand';
@@ -39,6 +42,10 @@ import {
   PlaidState,
   Transaction,
 } from './types';
+
+function isNoSessionError(error: unknown): boolean {
+  return error instanceof Error && error.message.includes('No active crypto session');
+}
 
 function toStoreAccount(acc: PlaidAccount): Account {
   return {
@@ -165,43 +172,62 @@ export const createPlaidSlice: StateCreator<FinanceState, [], [], PlaidState> = 
       const message = error instanceof Error ? error.message : 'Failed to fetch Plaid finance data';
       const code = error instanceof KuraApiError ? error.code : undefined;
 
-      // Try biometric restore → decrypt raw cache.
-      Logger.warn('PlaidSlice', 'Live fetch failed; attempting biometric cache restore', {
-        message,
-      });
-      try {
-        const keys = await restoreWithBiometrics();
-        if (keys) {
-          // Rebuild a partial CryptoSession so subsequent fresh fetches also work.
-          setCryptoSession({
-            x25519PrivateKey: keys.x25519PrivateKey,
-            x25519PublicKeyBase64: keys.x25519PublicKeyBase64,
-            dekWrapKey: new Uint8Array(32),
-            localCacheKey: new Uint8Array(32),
-          });
+      // ── Session expired (AppLock cleared CryptoSession) ──────────────────
+      if (isNoSessionError(error)) {
+        Logger.warn('PlaidSlice', 'Session expired; attempting biometric restore');
+        try {
+          const keys = await restoreWithBiometrics();
+          if (keys) {
+            setCryptoSession({
+              x25519PrivateKey: keys.x25519PrivateKey,
+              x25519PublicKeyBase64: keys.x25519PublicKeyBase64,
+              dekWrapKey: new Uint8Array(32),
+              localCacheKey: new Uint8Array(32),
+            });
 
-          const cached = await fetchPlaidFromCache({
-            privateKey: keys.x25519PrivateKey,
-            publicKey: base64ToBytes(keys.x25519PublicKeyBase64),
-          });
-          if (cached) {
-            Logger.warn('PlaidSlice', 'Serving Plaid data from biometric-restored cache');
-            applySnapshot(set, get, cached, `Cached at ${new Date().toISOString()}`);
-            return;
+            const cached = await fetchPlaidFromCache({
+              privateKey: keys.x25519PrivateKey,
+              publicKey: base64ToBytes(keys.x25519PublicKeyBase64),
+            });
+            if (cached) {
+              Logger.warn('PlaidSlice', 'Serving Plaid data from biometric-restored cache');
+              applySnapshot(set, get, cached, `Cached at ${new Date().toISOString()}`);
+              return;
+            }
           }
+        } catch (biometricError) {
+          Logger.warn('PlaidSlice', 'Biometric restore threw', {
+            error: biometricError instanceof Error ? biometricError.message : String(biometricError),
+          });
         }
-      } catch (biometricError) {
-        Logger.warn('PlaidSlice', 'Biometric cache restore failed', {
-          error:
-            biometricError instanceof Error ? biometricError.message : String(biometricError),
-        });
+
+        // Biometric not available, no stored key, or user cancelled → logout.
+        Logger.warn('PlaidSlice', 'Biometric restore unavailable; forcing logout');
+        set({ isLoadingPlaidData: false });
+        // Dynamic import breaks the store circular dependency (useAppStore → useFinanceStore → here).
+        const { useAppStore } = await import('../useAppStore');
+        void useAppStore.getState().logout();
+        return;
+      }
+
+      // ── Network / API error with valid session — show stale cache ────────
+      try {
+        const cached = await fetchPlaidFromCache();
+        if (cached) {
+          Logger.warn('PlaidSlice', 'Network error; serving Plaid data from local cache', {
+            message,
+          });
+          applySnapshot(set, get, cached, `Cached (offline)`);
+          return;
+        }
+      } catch {
+        // cache miss — fall through to error state
       }
 
       Logger.warn('PlaidSlice', 'Failed to hydrate Plaid data', { message, code });
       set({ isLoadingPlaidData: false, plaidError: message });
 
       // KEY_PAIR_NOT_FOUND / 409 means the user hasn't bootstrapped E2EE yet.
-      // Surface that error to the UI without crashing the screen.
       throw error;
     }
   },

@@ -1,20 +1,17 @@
 /**
  * Asset history slice — Phase 3.
  *
- * Previously this slice produced snapshots client-side from live Plaid /
- * Exchange / Web3 state. With Zero-Access E2EE the backend records snapshots
- * **at sync time** (when it briefly holds the plaintext SEK) and we read
- * them back from `/api/assets/history/encrypted`, decrypt, then aggregate.
- *
- * Consumer interface (`assetHistory: AssetSnapshot[]` with `timestamp` ms +
- * `totalAssets`) is preserved so `WaveChart` / `PerformanceSummary` keep
- * working unchanged.
- *
- * Cache strategy:
- *   - On success: `fetchAssetHistory` internally writes the raw encrypted
- *     envelope to AsyncStorage (no re-encryption).
- *   - On failure (network error or CryptoSession cleared by AppLock):
- *     prompt biometric auth → restore X25519 private key → decrypt raw cache.
+ * Error + cache strategy:
+ *   ┌─ Live fetch fails
+ *   │
+ *   ├─ "No active crypto session" (AppLock fired)
+ *   │     → Biometric restore (Face ID / Touch ID)
+ *   │         → success : rebuild partial session → decrypt raw cache → show data
+ *   │         → failure : no biometric key or cancelled → logout()
+ *   │
+ *   └─ Any other error (network, 5xx, …)
+ *         → Decrypt raw cache with existing CryptoSession (stale-data UX)
+ *         → No biometric prompt for non-session errors
  */
 
 import { StateCreator } from 'zustand';
@@ -27,6 +24,10 @@ import Logger from '../../utils/Logger';
 import { isStablecoin } from '../../utils/stablecoinUtils';
 
 const DEFAULT_DAYS = 365;
+
+function isNoSessionError(error: unknown): boolean {
+  return error instanceof Error && error.message.includes('No active crypto session');
+}
 
 function toAssetSnapshot(point: {
   date: string;
@@ -78,45 +79,63 @@ export const createHistorySlice: StateCreator<FinanceState, [], [], HistoryState
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to fetch asset history';
 
-      // Try biometric restore → decrypt raw cache.
-      Logger.warn('HistorySlice', 'Live fetch failed; attempting biometric cache restore', {
-        message,
-      });
-      try {
-        const keys = await restoreWithBiometrics();
-        if (keys) {
-          // Rebuild a partial CryptoSession so subsequent fresh fetches also work.
-          setCryptoSession({
-            x25519PrivateKey: keys.x25519PrivateKey,
-            x25519PublicKeyBase64: keys.x25519PublicKeyBase64,
-            dekWrapKey: new Uint8Array(32),
-            localCacheKey: new Uint8Array(32),
-          });
+      // ── Session expired (AppLock cleared CryptoSession) ──────────────────
+      if (isNoSessionError(error)) {
+        Logger.warn('HistorySlice', 'Session expired; attempting biometric restore');
+        try {
+          const keys = await restoreWithBiometrics();
+          if (keys) {
+            setCryptoSession({
+              x25519PrivateKey: keys.x25519PrivateKey,
+              x25519PublicKeyBase64: keys.x25519PublicKeyBase64,
+              dekWrapKey: new Uint8Array(32),
+              localCacheKey: new Uint8Array(32),
+            });
 
-          const points = await fetchAssetHistoryFromCache(
-            {},
-            {
-              privateKey: keys.x25519PrivateKey,
-              publicKey: base64ToBytes(keys.x25519PublicKeyBase64),
-            },
-          );
-          if (points) {
-            const snapshots = points.map(toAssetSnapshot);
-            Logger.warn('HistorySlice', 'Serving asset history from biometric-restored cache', {
-              points: snapshots.length,
-            });
-            set({
-              assetHistory: snapshots,
-              isLoadingAssetHistory: false,
-            });
-            return;
+            const points = await fetchAssetHistoryFromCache(
+              {},
+              {
+                privateKey: keys.x25519PrivateKey,
+                publicKey: base64ToBytes(keys.x25519PublicKeyBase64),
+              },
+            );
+            if (points) {
+              const snapshots = points.map(toAssetSnapshot);
+              Logger.warn('HistorySlice', 'Serving asset history from biometric-restored cache', {
+                points: snapshots.length,
+              });
+              set({ assetHistory: snapshots, isLoadingAssetHistory: false });
+              return;
+            }
           }
+        } catch (biometricError) {
+          Logger.warn('HistorySlice', 'Biometric restore threw', {
+            error: biometricError instanceof Error ? biometricError.message : String(biometricError),
+          });
         }
-      } catch (biometricError) {
-        Logger.warn('HistorySlice', 'Biometric cache restore failed', {
-          error:
-            biometricError instanceof Error ? biometricError.message : String(biometricError),
-        });
+
+        // Biometric not available, no stored key, or user cancelled → logout.
+        Logger.warn('HistorySlice', 'Biometric restore unavailable; forcing logout');
+        set({ isLoadingAssetHistory: false });
+        const { useAppStore } = await import('../useAppStore');
+        void useAppStore.getState().logout();
+        return;
+      }
+
+      // ── Network / API error with valid session — show stale cache ────────
+      try {
+        const points = await fetchAssetHistoryFromCache();
+        if (points) {
+          const snapshots = points.map(toAssetSnapshot);
+          Logger.warn('HistorySlice', 'Network error; serving asset history from local cache', {
+            message,
+            points: snapshots.length,
+          });
+          set({ assetHistory: snapshots, isLoadingAssetHistory: false });
+          return;
+        }
+      } catch {
+        // cache miss — fall through to error state
       }
 
       Logger.warn('HistorySlice', 'Asset history hydration failed', { message });

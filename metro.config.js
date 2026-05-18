@@ -6,6 +6,18 @@ const config = getDefaultConfig(__dirname);
 const tssrp6aCryptoShim = path.resolve(__dirname, 'shims/tssrp6aCrypto.js');
 const cryptoShim = path.resolve(__dirname, 'shims/crypto.js');
 
+// react-native-libsodium's "react-native" field points to src/index.ts (TypeScript
+// source). Metro transforms it with the Hermes Babel preset which converts
+// `export default namespace` to an Object.defineProperty getter — making the
+// resulting exports.default non-writable. This causes:
+//   TypeError: Cannot assign to property 'default' which has only a getter
+// Fix: redirect to the pre-compiled CommonJS build which uses plain
+// writable exports.default assignment and doesn't trigger this issue.
+const libsodiumCjsIndex = path.resolve(
+  __dirname,
+  'node_modules/react-native-libsodium/lib/commonjs/index',
+);
+
 // Custom resolveRequest: replace problematic module imports BEFORE Metro
 // tries to apply package "exports" / built-in resolution. Used because
 // `extraNodeModules` only intercepts top-level bare specifiers, not the
@@ -25,6 +37,13 @@ config.resolver = {
     crypto: cryptoShim,
   },
   resolveRequest: (context, moduleName, platform) => {
+    // Force react-native-libsodium to its pre-compiled CJS build so Metro
+    // doesn't process the TypeScript source with a transform that makes
+    // `exports.default` non-writable (getter-only).
+    if (moduleName === 'react-native-libsodium') {
+      return { type: 'sourceFile', filePath: libsodiumCjsIndex + '.js' };
+    }
+
     // Redirect tssrp6a's WebCrypto-dependent module to our pure-JS replacement.
     // tssrp6a/src/parameters.ts does `import "./crossEnvCrypto"`, which Metro
     // resolves to either the cjs or esm copy depending on package.json fields.
